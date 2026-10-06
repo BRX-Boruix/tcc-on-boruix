@@ -126,6 +126,52 @@ BORUIX 内 `tcc hello.c -o .../hello`：**编译通过**（头文件生效、无
 `libtcc1.a`（支持例程，未备）与**链接布局**（本内核要求 `PT_LOAD` 页对齐、无 RELRO 拆页）。
 诊断手段：`tcc -v hello.c -o hello` 会打印它实际调用的链接步骤。
 
+## 进展（2026-10-06 第 4 次）：段错误消除，改为干净的 memory full
+
+### 分割诊断：tcc 自己的链接器是好的
+
+`tcc -v -nostdlib hello.c -o hello` 在 BORUIX 内的输出：
+```text
+  tcc version 0.9.28-boruix (x86_64 Linux)
+  -> /volumes/BORUIX_DATA/3p/hello.c
+  tcc: error: unresolved reference to 'printf'
+  退出码 1
+```
+即：**不读 crt/库时，tcc 的编译与链接都正常**，还能给出正确的未定义符号报错。
+故段错误发生在它**读 `crt1.o`/`crti.o`/`libc.a`** 时。
+
+### 两处修复
+
+1. **crt 对象加 `-fno-addrsig`**：clang 默认给对象加 `.llvm_addrsig` 节（非标准节类型
+   `LLVM_ADDRSIG`），tcc 的 ELF 读取器未必认。
+2. **补上 `libtcc1.a`**（编译器支持例程）：新增 `boruix/build_libtcc1.py`，按上游
+   `lib/Makefile` 的 `OBJ-x86_64` 集合编 8 个对象（libtcc1/stdatomic/atomic/builtin/
+   alloca/alloca-bt/va_list/dsohandle），**不含** runmain/tcov/bt-*/bcheck*（那些只用于
+   native 编译器的回溯与边界检查，本移植已如实关闭）。产物 18 KB，由 `stage_assets.py` 铺盘。
+
+### 结果：段错误消失
+
+```text
+  tcc version 0.9.28-boruix (x86_64 Linux)
+  -> /volumes/BORUIX_DATA/3p/hello.c
+  tcc: memory full
+  退出码 1
+```
+
+从**崩溃**变成了**明确的失败**：tcc 的 `tcc_malloc` 拿到 NULL。
+
+### 已查的两件事（都为排除法服务）
+
+- `libc.a` **有符号索引**（armap 9330 行）且只有 **56 个成员**——tcc 只会加载需要的成员，
+  不是「把整个归档读进内存」；
+- libc 的 `malloc` 经 **`brk`** 增长（`libsys::brk` → `SYS_MEMORY_GROW`），每次至少 64 KB；
+  内核侧**未发现**明显的每进程内存上限常量。
+
+### 下一步
+
+定位 `brk` 为何失败：打印 `brk` 的返回值与失败时的 errno、统计已分配量；同时查内核
+`sys_brk` 的实现（是否与已有映射冲突、是否有隐含上界）。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；

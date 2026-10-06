@@ -64,8 +64,11 @@ def main():
     with open(empty, "w", encoding="utf-8", newline="\n") as f:
         f.write("/* empty: BORUIX 无 .init/.fini 前后缀机制 */\n")
     for name in ("crti.o", "crtn.o"):
+        # -fno-addrsig：clang 默认给对象加 .llvm_addrsig 节（非标准节类型 LLVM_ADDRSIG），
+        # tcc 的 ELF 读取器未必认——它读归档/对象时崩（实测 SIGSEGV）的首要嫌疑。
         r = subprocess.run([cc, "--target=x86_64-unknown-none", "-ffreestanding",
-                            "-fno-pic", "-c", empty, "-o", os.path.join(dest, name)])
+                            "-fno-pic", "-fno-addrsig", "-c", empty,
+                            "-o", os.path.join(dest, name)])
         if r.returncode != 0:
             sys.exit("生成 %s 失败" % name)
         print("[stage] %s（空对象）" % name)
@@ -74,6 +77,15 @@ def main():
     # 4) libc.a
     shutil.copy(os.path.join(lib_src, "libc.a"), os.path.join(dest, "libc.a"))
     print("[stage] libc.a <- %s" % os.path.join(lib_src, "libc.a"))
+
+    # 4b) libtcc1.a（编译器支持例程）：由 boruix/build_libtcc1.py 产出。
+    #     没有它时 tcc 链接会因为缺少 64 位除法/软浮点等例程而失败。
+    libtcc1 = os.path.join(SRC, "_build", "libtcc1.a")
+    if os.path.isfile(libtcc1):
+        shutil.copy(libtcc1, os.path.join(dest, "libtcc1.a"))
+        print("[stage] libtcc1.a <- %s" % libtcc1)
+    else:
+        print("[stage] 警告：未找到 libtcc1.a，先跑 boruix/build_libtcc1.py")
 
     # 5) 验收夹具 hello.c：从**正本**（tests/hello.c）拷到磁盘。
     #    为什么要脚本拷而不是手工写：手工经多层引号/转义拼源码出过事——
