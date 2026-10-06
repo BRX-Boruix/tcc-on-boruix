@@ -1,55 +1,53 @@
-/* probe_pf_rcx.c v8 —— 3P6-1 根因五：判别被污染的是 rcx 还是"编译器分配的上界寄存器"。
+/* probe_pf_rcx.c v9 —— 3P6-1 根因五：给循环加**独立硬上界**，从而在被破坏时仍能存活并报告。
  *
- * v7 读数 rcx=0x40006e（期望 0x400000）。算术上"逐 1 递增不可能跳过"，故唯一自洽解释是
- * **上界寄存器被改成了 0x40006e**，rcx 是正常递增出来的（见 CRT-AND-LIBS 第 45 次更正）。
- *
- * v8 把上界做成**循环内部自带的倒计数**（\`mov cnt,rdx; decq rdx; jnz\`），只在进入时读一次
- * 编译器给的 cnt，循环内不再引用任何编译器分配的寄存器作为边界：
- *   - 若 rcx 正确走到 0x400000 且 rdx=0  => 上一版坏的是编译器分配的 end 寄存器；
- *   - 若 rcx 仍不对                     => 坏的是 rcx 本身。
- * 两种结果都指向"内核把帧 rcx 槽里的代码地址恢复进了用户 GPR"。
+ * v8 事实：形态升级——循环跑过了预期终点（fault_addr 恰为堆断点 0x100401000），
+ *          且 ret=0x0（frame.rsp 也坏）=> 中断帧多字段被破坏。
+ * v9 的 asm 用 \`%r8\` 存一个**独立硬上界**（off+count）：即使 \`rdx\`（倒计数）被改大，
+ *    循环也会在 \`rcx\` 越过硬上界时退出，然后**打印三个寄存器**，从而回答：
+ *      - 到底是 \`rdx\` 被改大（循环因此想跑更远）？
+ *      - 还是 \`rcx\` 被跳大（硬上界立刻触发）？
+ *      - 还是 \`rdi\` 被改（写地址整体偏移）？
+ *    三种情形打印出的值不同，一次即可判定。且因为硬上界保证不越界，**不会再崩**。
  */
 #include <stdio.h>
 #include <stdlib.h>
-
-static void write_span2(unsigned char *base, unsigned long off, unsigned long count,
-                        unsigned long *rcx_out, unsigned long *rdx_out)
-{
-    unsigned long r = 0, d = 0;
-    __asm__ __volatile__(
-        "mov %[b], %%rdi\n\t"
-        "mov %[o], %%rcx\n\t"
-        "mov %[c], %%rdx\n\t"
-        "mov $0x5a, %%sil\n\t"
-        "1:\n\t"
-        "movb %%sil, (%%rdi,%%rcx)\n\t"
-        "incq %%rcx\n\t"
-        "decq %%rdx\n\t"
-        "jnz 1b\n\t"
-        "mov %%rcx, %[rout]\n\t"
-        "mov %%rdx, %[dout]\n\t"
-        : [rout] "=r"(r), [dout] "=r"(d)
-        : [b] "r"(base), [o] "r"(off), [c] "r"(count)
-        : "rdi", "rcx", "rdx", "rsi", "memory");
-    *rcx_out = r;
-    *rdx_out = d;
-}
 
 int main(void) {
     const unsigned long n = 4ul * 1024 * 1024;
     unsigned char *b = (unsigned char *)malloc(n);
     if (!b) {
-        printf("[PF8] malloc failed\n");
+        printf("[PF9] malloc failed\n");
         return 1;
     }
-    printf("[PF8] buf=%p\n", (void *)b);
+    printf("[PF9] buf=%p\n", (void *)b);
 
-    unsigned long rcx = 0, rdx = 1;
-    write_span2(b, 0x10, n - 0x10, &rcx, &rdx);
-    printf("[PF8] rcx=%lx expect=%lx  rdx=%lx expect=0  %s\n",
-           rcx, n, rdx,
-           (rcx == n && rdx == 0) ? "BOTH-OK" : "MISMATCH");
+    unsigned long rdi_end = 0, rcx_end = 0, rdx_end = 0;
+    const unsigned long off = 0x10, cnt = n - 0x10;
+    __asm__ __volatile__(
+        "mov %[b], %%rdi\n\t"
+        "mov %[o], %%rcx\n\t"
+        "mov %[c], %%rdx\n\t"
+        "mov %[e], %%r8\n\t"
+        "mov $0x5a, %%sil\n\t"
+        "1:\n\t"
+        "movb %%sil, (%%rdi,%%rcx)\n\t"
+        "incq %%rcx\n\t"
+        "cmpq %%r8, %%rcx\n\t"
+        "ja 9f\n\t"
+        "decq %%rdx\n\t"
+        "jnz 1b\n\t"
+        "9:\n\t"
+        "mov %%rdi, %[ro]\n\t"
+        "mov %%rcx, %[rco]\n\t"
+        "mov %%rdx, %[rdo]\n\t"
+        : [ro] "=r"(rdi_end), [rco] "=r"(rcx_end), [rdo] "=r"(rdx_end)
+        : [b] "r"(b), [o] "r"(off), [c] "r"(cnt), [e] "r"(off + cnt)
+        : "rdi", "rcx", "rdx", "rsi", "r8", "memory");
 
-    printf("[PF8] all done\n");
+    printf("[PF9] rdi=%lx (buf=%lx) rcx=%lx (expect %lx) rdx=%lx (expect 0) %s\n",
+           rdi_end, (unsigned long)b, rcx_end, off + cnt, rdx_end,
+           (rdi_end == (unsigned long)b && rcx_end == off + cnt && rdx_end == 0)
+               ? "OK" : "MISMATCH");
+    printf("[PF9] all done\n");
     return 0;
 }
