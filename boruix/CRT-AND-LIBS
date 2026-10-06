@@ -266,6 +266,39 @@ BORUIX 内 `tcc hello.c -o .../hello`：**编译通过**（头文件生效、无
 3. 一个只 malloc、不 mmap 的程序把堆推到 `next_mmap` 游标之上是否真的安全
    （`USER_HEAP_BASE` 与 `USER_HEAP_BASE + 16MiB` 同向增长，这条**仍未验证**）。
 
+## 更正之二（2026-10-06 第 7 次）：上一轮**推翻得太早**了
+
+上一轮我凭读代码断言「两个分配器各自只用自己扩展出来的区域，不重叠，所以共用 brk 不是 bug」。
+**实测把这个断言否掉了。**
+
+### 二分实验（决定性）
+
+| 探针 | 循环内的分配行为 | 结果 |
+| --- | --- | --- |
+| `probe_malloc_only.c` | **只有 C 的 `malloc`**，循环里一次 `printf` 都不做 | **干净成功**：走到 i=53、54,272 KB，退出码 0 |
+| `probe_heap.c` | C 的 `malloc` **与** `printf`（触发 Rust 侧分配 → libsys 的 buddy）**交替** | **卡死在 #48（50,176 KB）**，并伴随 buddy 堆不变式 panic |
+
+**结论：C 的 `malloc` 单独没问题；问题出在两者交替推进同一个 `brk` 断点。**
+
+教训（与本项目此前多次同类）：**「读代码看起来对」不等于对**——上一轮我就是这样把正确线索排除掉的。
+凡涉及两个组件共享同一状态（这里是 `brk` 断点），**必须用可分离的实验分别验证**，不能只靠推理。
+
+### 机制**尚未解释**（如实声明，不编）
+
+按代码看，两边都是「`brk(0)` 取当前断点 → `brk(target)` 扩展 → 只用新拿到的那段」：
+
+- `libc/malloc.rs` 的 `grow_heap`：`cur = brk(0)` → `brk(cur + align16(grow))`；
+- `libsys/allocator.rs` 的 `grow_user_heap`：`cur_brk = brk(0)` → `brk(cur_brk + grow_size)` → `add_to_heap(cur_brk, new_brk)`。
+
+两者都不收缩 `brk`（`libc/malloc.rs` 里只有 300/307 两处 `brk` 调用，都在增长路径上）。
+**那么交替为何仍会破坏 buddy 的 free_list，目前没有解释。**
+
+### 下一步（要拿数据，不要推理）
+
+给两边都加**可观测点**：每次 `brk` 扩展时把 `(调用方, cur_brk, new_brk, 分配大小)` 打到串口，
+跑交替探针，看两边的区间是否真的如代码所示互不相交。若相交，就是分配器的记账 bug；
+若不相交，则问题在 buddy 自身的 `add_to_heap` 契约（对齐/长度）或 Rust 侧的越界写。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；
