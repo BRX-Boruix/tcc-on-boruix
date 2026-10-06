@@ -3286,6 +3286,17 @@ ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
 
 /* load an object file and merge it with current files */
 /* XXX: handle correctly stab (debug) info */
+/* 对象加载跟踪开关（默认关闭；TCC_DIAG_SEC=1 打开）。见调用点处的说明。 */
+static int diag_sec_on(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("TCC_DIAG_SEC");
+        cached = (v && v[0] == '1') ? 1 : 0;
+    }
+    return cached;
+}
+
 ST_FUNC int tcc_load_object_file(TCCState *s1,
                                 int fd, unsigned long file_offset)
 {
@@ -3351,6 +3362,19 @@ invalid:
     /* now examine each section and try to merge its content with the
        ones in memory */
     for(i = 1; i < ehdr.e_shnum; i++) {
+        /* 对象加载跟踪（定位「特定对象 × 累积状态」崩溃）。
+         *
+         * 用 write 直写而不是 printf：stdout 有缓冲，崩溃时缓冲区会丢，
+         * 那样最后一行证据就没了。
+         *
+         * **默认关闭**，需 TCC_DIAG_SEC=1 才输出——不能让它改变 tcc 的正常行为。
+         * 实测用途：把崩溃精确到「某个对象的第几个节」（见 boruix/CRT-AND-LIBS）。 */
+        if (diag_sec_on()) {
+            char _db[64];
+            int _dn = snprintf(_db, sizeof(_db), "[SEC] i=%d nb=%d\n", i, s1->nb_sections);
+            if (_dn > 0)
+                write(1, _db, _dn);
+        }
         /* no need to examine section name strtab */
         if (i == ehdr.e_shstrndx)
             continue;
