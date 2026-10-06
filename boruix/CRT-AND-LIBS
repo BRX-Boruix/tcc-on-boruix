@@ -1150,3 +1150,70 @@ tcc 的 `load_data()` 因此拿到 `-1/EFAULT`，又**丢弃返回值**，缓冲
 - 顺带记一笔（**后续会咬人**）：clang 默认给对象加 `.llvm_addrsig` 节（非标准节类型
   `LLVM_ADDRSIG`），tcc 的 ELF 读取器未必认。`libc.a` 里的对象同样带它，故修好 `lseek` 之后
   若报节相关错误，优先查这里（`-fno-addrsig` 可抑制）。
+
+## ✅ 内核侧修法落地：预校验阶段主动补页（2026-10 本轮）
+
+### 落地形态（不是「整段补页再拷贝」的草率版）
+
+- `arch/arch/src/paging.rs`：`PageFaultCode` trait 新增 `synthetic(write: bool) -> Self`——
+  内核主动补页要走**与真实缺页同一条**策略路径，却没有硬件交付的错误码；合成码与真实码
+  **同形**（present=0、user=1、write 随意图），故不会绕过任何权限判定。位组装留在架构层（MM6）。
+- `mm/src/user_space.rs`：
+  - 纯函数 `fault_plan(start, len) -> Option<(first_page, end)>`（host 单测 5 条锚定）；
+  - `UserAddressSpace::fault_in_range::<PC>(start, len, access)`——逐页：已按意图就绪则跳过，
+    否则交给 `handle_page_fault`（COW → 栈增长 → 区域权限 → 2M/4K 补页）。**不新增任何权限**：
+    能被它补上的页，用户程序自己触碰也能补上；不在任何已声明区域内的地址依旧补不上。
+  - 帧耗尽导致**部分**补页时返回 false，调用方整体拒绝，绝不部分拷贝。
+- `kernel/src/syscall.rs::validate_user_range` 由三层扩为四层：长度上限 → 窗口 → **主动补页** → 页表复核。
+  `copy_path_from_user` 走同一入口，自动受益。
+
+### 验证证据
+
+- **全量 selftest 通过**（`python tools/checks/regression/selftest.py --timeout 900`）：
+  8544 行、显式 PASS 96 处、0 PANIC / 0 CPU EXCEPTION / 0 assert 失败、
+  尾标 `[test-fast4] process 89 exit(code=0)`（收敛后 rc=124 为正常终态）、判定：通过。
+- **新增对抗用例**（`[test-syscall-usercopy]`，语义按 AR1a 补全后重写）：
+  - 未触碰页作 `write` 源 → **成功**（修复前 EFAULT）；
+  - 未触碰页作 `readdir` 输出目标（`copy_to_user`）→ **成功**（这正是 tcc 病灶的形状）；
+  - **野指针**（窗口内、不在任何已声明区域）→ 仍 **EFAULT**（补页不得放松安全断言）；
+  - 长度越过**已声明区域**边界 → EFAULT。
+- **tcc 侧效果**：`[SHORT]` 行全部消失（读不再失败），崩溃点**再次前移**——对象文件已被真正加载。
+
+## 根因五（当前卡点）：用户态写越过堆断点（2026-10 本轮，未解决）
+
+### 实测留证（两次独立运行，同形）
+
+```text
+  [C/8] 00000001005c8000 00000001009c9000        <- 最后一次 brk 扩展（4 MiB，恰为 malloc(0x400000)）
+  [SR] sec=0x100250010 new=2685008 alloc=0 size=4194304 data=0x1005c8010 brk=1009c9000
+  [fatal] user exception -> terminate: sig=11 vector=14
+          fault_addr=0x100a1ec5c rip=0x456c4c ret=0x42e01f err=0x6
+  符号化: 0x456c4c -> memset ; 0x42e01f -> section_add（section_realloc 被内联）
+  另一次运行: fault_addr=0x100a202bc rip=memset ret=tcc_load_object_file
+```
+
+`err=0x6` = present=0 / write=1 / user=1 → 用户态**写**一个没有 PTE 的页。
+
+### 已由测量**排除**的假设
+
+- **「两个分配器共用 brk 相交」**：`boruix_heap_diag(1)` 同时打开 libc malloc（`[C/pid]`）与
+  libsys buddy（`[L/pid]`）两侧轨迹；两次运行**一条 `[L/...]` 都没有**——本进程内 libsys 的
+  buddy 从未扩展 brk，故不是它切走了区间。（这一族嫌疑此前登记在 `malloc.rs` 的注释里，现被证伪。）
+- **分配器给太小的块**：`check_capacity` 契约自检（同一开关打开）**零告警**；且手算
+  `malloc(0x400000)` 的可用容量**恰好 0x400000**（`need=0x400020`、payload `0x1005c8010`、
+  上界 `0x1009c8010`、堆区上界 `0x1009c9000`）——这一次 memset 完全落在堆内。
+
+### 未解的矛盾（下一步必须钉死的点）
+
+被仪器化的那次 `section_realloc` 的 memset 范围 `[0x1005c8010, 0x1009c8010)` **在堆内**，
+但 `fault_addr` 是 `0x100a1ec5c`（越过断点约 `0x55C5C`）。两者不能同时为真，说明
+**崩溃的 memset 不是被打印的那一次**（或打印值与实际实参不一致）。
+
+### 下一步（按成本排序）
+
+1. 在 memset **前后各打一行**（`[SR-before]`/`[SR-after]`），先判定「是否真的死在这一行」；
+2. 若死在 memset 内：把 `rdi`/`rdx` 与块的**真实容量**（`malloc_usable_size`）一并打印，
+   并把 `size - data_allocated > 真实容量` 单独报一行——**用数据取代推断**；
+3. 同时打印 `new=2685008` 的来源（`section_add` 的 `offset1 = offset + size`，`size` 来自
+   `shdr[i].sh_size`）：2.56 MiB 的单节大小本身可疑；若 `sh_size` 是垃圾，那是节表读取的
+   另一处**未校验输入**，与根因四同族。
