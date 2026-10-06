@@ -1217,3 +1217,48 @@ tcc 的 `load_data()` 因此拿到 `-1/EFAULT`，又**丢弃返回值**，缓冲
 3. 同时打印 `new=2685008` 的来源（`section_add` 的 `offset1 = offset + size`，`size` 来自
    `shdr[i].sh_size`）：2.56 MiB 的单节大小本身可疑；若 `sh_size` 是垃圾，那是节表读取的
    另一处**未校验输入**，与根因四同族。
+
+### 第 34–36 次：用零分配/无缓冲诊断把"越界写"逼到自相矛盾，最终定位到「起点本身在 brk 之外」
+
+**诊断工具升级（方法本身保留）**：`printf` 会走 stdio 缓冲（崩溃时未 flush 的输出会丢，
+日志顺序不可信）且内部会 `malloc`（可能复用被测内存、制造假象）。改用**零分配 + 无缓冲**的
+`write(2)` + 栈缓冲十六进制行（`sr_dbg`），并把 memset 的**起点/长度先算进局部量**
+（"冻结实参"）再打印——诊断值与实参从此不可能不一致。
+
+**三次独立运行，同一关系**（`data` = `tcc_realloc` 返回的 payload，恒为 `0x1005c8010`；
+`brk` 恒为 `0x1009c9000`）：
+
+| 运行 | 诊断输出 | `fault_addr` | `rip` | 关系 |
+|---|---|---|---|---|
+| 5（printf 诊断） | `data=0x1005c8010 alloc=0 size=0x400000 rdi=0x1005c8010 rdx=0x400000` | `0x100a1fe7c` | `0x457e6c` | `fault = data + rip` |
+| 6（write 诊断，打印在 memset **前**） | `a1=0 p=data n=0x400000` | `0x100a1f93c` | `0x45792c` | `fault = data + rip` |
+| 7（write 诊断，打印在 memset **后**） | 无输出（崩在打印之前） | `0x100a1f97c` | `0x45796c` | `fault = data + rip` |
+
+三次的 `rip` 都是**该二进制里 memset 那条字节存储指令自身的地址**（随重链漂移）；
+而 memset 的**标称**范围是 `[0x1005c8010, 0x1009c8010)`——**完全在 brk 之内**。
+运行 7 尤其关键：memset 之前**没有任何调用**（不可能是"中间那次调用破坏了实参"），
+仍然崩在同一关系上。
+
+### 结论（已由测量确证，不再依赖推断）
+
+`rax + rcx = data + rip`，而 `rax = rdi = data + sec->data_allocated`、`rip` 是存储指令
+地址 ⇒ **`sec->data_allocated` 这个字段里放着一个"代码地址"**（恰好是当时那条 memset 存储
+指令的地址），于是 `p = data + 那个地址` 直接落在 brk 之外，**第一条存储就 #PF**，
+且该地址不属于任何已声明区域 → 终止进程。
+
+这一条同时解释了此前所有"神秘"现象：`fault_addr` 与 `rip` 的诡异固定关系、每次重链后
+崩溃地址跟着二进制漂移、以及"加几条 write 就改变行为"。
+
+### 尚未确定（下一步只需钉死这一点）
+
+**谁把代码地址写进了 `sec->data_allocated`？** 两条候选：
+1. `sec` 本身是**垃圾指针**（指向了某处含代码地址的内存）；
+2. `sec` 是合法 `Section`，但该字段被**别处的越界写/野指针写**覆盖
+   （同一 Section 的 `data_offset` 在 `[SA]` 里看着正常，说明覆盖是"定点"的）。
+
+**下一步（唯一入口，成本低）**：把 `sr_dbg` 装进 `section_add`，对**每一次**调用打印
+`sec / sh_type / data_offset / data_allocated / size / align / offset1` 与**调用方返回地址**
+（`__builtin_return_address(0)`），并在 `section_realloc` 的**入口**（任何读写之前）打印同样的
+`sec` 三元组。判据：
+- 若 `section_add` 入口就已是代码地址 → 覆盖发生在上游（`shdr` 垃圾 或 `sec` 野指针）；
+- 若入口正常、`section_realloc` 入口才变 → 覆盖发生在两者之间。
