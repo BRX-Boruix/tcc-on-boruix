@@ -36,4 +36,19 @@
  * 若将来要支持，正确做法是先在 libc 里实现真正的信号量，再打开这一项。 */
 #define CONFIG_TCC_SEMLOCK 0
 
+/* 标识"这是 BORUIX 移植"。
+ *
+ * 用途：`tccrun.c` 里有一处**本系统无法实现**的功能需要排除——运行期异常回溯
+ * （`-run` 模式下捕获 SIGSEGV 等并打印源码位置）。它需要三样 BORUIX 没有的东西：
+ *   1. 信号处理器收到的 `ucontext_t`——本内核投递时**恒传 NULL**（见 libc/src/signal.rs）；
+ *   2. `SA_SIGINFO` 语义——libc 未实现（处理器一律按 `void(int)` 进入）；
+ *   3. `SIGABRT`——本内核没有该信号（libc 的 signal.h 有意不声明内核没有的信号）。
+ *
+ * **为什么不给一个"Linux 兼容外壳"**：那会让 tcc 装上 `SA_SIGINFO` 处理器，却被以
+ * `void(int)` 签名调用（`siginfo` 参数是垃圾）→ **静默崩**；而且 libc 已明确"不声明内核
+ * 没有的信号"（S09 不伪造），加个 SIGABRT 与之直接冲突。故如实排除该路径并留此标记。
+ *
+ * 上游补丁位置见 `boruix/UPSTREAM-PATCHES`。 */
+#define CONFIG_TCC_BORUIX 1
+
 #endif /* _BORUIX_CONFIG_H */

@@ -4,8 +4,8 @@
 
 把 **TCC**（Tiny C Compiler）带到 BORUIX 上——让这个系统能**在自己内部**编译 C 程序。
 
-> **仓库状态：进行中。** 上游源码树已引入，移植工作已开始；12 个核心源文件里 **8 个已能编译通过**，
-> 其余 4 个只卡在 **2 个缺口**上（清单见下）。
+> **仓库状态：进行中。** 上游源码树已引入；**全部核心源文件已能编译并链接出 `tcc.elf`**（1170 KB）。
+> **尚未在 BORUIX 内运行**——下一步是把它送进 QEMU 跑通 `tcc hello.c -o hello && ./hello`。
 
 ---
 
@@ -50,8 +50,9 @@ python boruix/build.py --sysroot %BORUIX_SYSROOT%
 
 ## 当前进度
 
-已编译通过（8/12）：`tccpp.c`、`tccgen.c`、`tccdbg.c`、`tccelf.c`、`tccasm.c`、`x86_64-gen.c`、
-`x86_64-link.c`、`i386-asm.c`。
+**已全部编译通过并链接成功**：`tcc.c`、`libtcc.c`、`tccpp.c`、`tccgen.c`、`tccdbg.c`、`tccelf.c`、
+`tccasm.c`、`tccrun.c`、`x86_64-gen.c`、`x86_64-link.c`、`i386-asm.c`（`tcctools.c` 由 `tcc.c` 无条件
+`#include`，故不单独编译——与上游 Makefile 的 `filter-out tcc.c tcctools.c` 同理）。
 
 仍卡住的 **2 个**缺口（**由真实编译报错导出，不是预猜**）：
 

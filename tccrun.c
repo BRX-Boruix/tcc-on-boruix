@@ -1216,11 +1216,22 @@ static int rt_error(rt_frame *f, const char *fmt, ...)
 #ifndef _WIN32
 # include <signal.h>
 # ifndef __OpenBSD__
-#  include <sys/ucontext.h>
+#  ifndef CONFIG_TCC_BORUIX
+#   include <sys/ucontext.h>
+#  endif
 # endif
 #else
 # define ucontext_t CONTEXT
 #endif
+
+/* ---- BORUIX 移植补丁（1/2）----
+ * 排除运行期异常回溯：它需要本系统没有的三样东西——
+ *   ① 信号处理器收到的 ucontext_t（本内核投递时**恒传 NULL**，见 libc/src/signal.rs）；
+ *   ② SA_SIGINFO 语义（libc 未实现，处理器一律按 void(int) 进入）；
+ *   ③ SIGABRT（本内核没有该信号，libc 有意不声明内核没有的信号）。
+ * 若给一个"Linux 兼容外壳"，tcc 会装上 SA_SIGINFO 处理器却被以 void(int) 调用 → **静默崩**。
+ * 故如实排除。补丁清单位于 boruix/UPSTREAM-PATCHES。 */
+#ifndef CONFIG_TCC_BORUIX
 
 /* translate from ucontext_t* to internal rt_context * */
 static void rt_getcontext(ucontext_t *uc, rt_frame *rc)
@@ -1435,7 +1446,14 @@ static void set_exception_handler(void)
 #endif
 }
 
-#endif
+#endif /* !_WIN32 */
+
+#else /* CONFIG_TCC_BORUIX */
+/* BORUIX 移植补丁（2/2）：上面整块（非 WIN32 与 WIN32 两个分支）在此被排除，只留一个空实现。
+ * 调用点（`set_exception_handler(), signal_set = 1;`）无需改动——运行期异常回溯在本系统上
+ * **如实缺席**，而不是装一个会崩的处理器。理由见补丁（1/2）与 boruix/UPSTREAM-PATCHES。 */
+static void set_exception_handler(void) {}
+#endif /* CONFIG_TCC_BORUIX */
 
 /* ------------------------------------------------------------- */
 /* return the PC at frame level 'level'. Return negative if not found */

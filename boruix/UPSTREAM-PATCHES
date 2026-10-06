@@ -1,0 +1,32 @@
+# 上游补丁清单（UPSTREAM PATCHES）
+
+本仓库根的 tcc 源码树来自上游（见 `UPSTREAM`）。移植过程中对**上游文件**做了以下改动。
+再同步上游时按此清单逐项重做，或确认上游已原生支持。
+
+## 1. `tccrun.c` —— 排除运行期异常回溯（2 处插入）
+
+**为什么必须改**：该功能需要三样 BORUIX 没有的东西——
+
+1. 信号处理器收到的 `ucontext_t`：本内核投递时**恒传 NULL**（`rdx=0`，见 `libc/src/signal.rs` 的文档）；
+2. `SA_SIGINFO` 语义：libc 未实现，处理器一律按 `void handler(int)` 进入；
+3. `SIGABRT`：本内核没有该信号，`libc/include/signal.h` **有意不声明**内核没有的信号（S09 不伪造）。
+
+**为什么不加"Linux 兼容外壳"**：那样 tcc 会装上 `SA_SIGINFO` 处理器，却被以 `void(int)` 签名调用
+（`siginfo` 参数是垃圾指针）→ **静默崩**。相比之下，如实排除该路径是唯一不骗人的选择。
+
+**改动位置**（用 `CONFIG_TCC_BORUIX` 守卫，该宏定义在 `boruix/config.h`）：
+
+- `#ifndef _WIN32` 之后插入 `#ifndef CONFIG_TCC_BORUIX`；
+- `set_exception_handler`（非 WIN32 版）之后插入 `#else` + 空实现 + `#endif`。
+
+守卫整块（含 `#include <sys/ucontext.h>`、`rt_getcontext`、`sig_error`、`set_exception_handler`），
+故**不需要** `sys/ucontext.h`。调用点（`set_exception_handler(), signal_set = 1;`）无需改动。
+
+## 为什么补丁这么少
+
+其余差异都通过**配置**吸收，不动上游源码：
+
+- `boruix/config.h`：`TCC_TARGET_X86_64` / `CONFIG_TCC_STATIC` / `CONFIG_TCC_SEMLOCK 0`；
+- 构建脚本 `boruix/build.py`：自带源文件清单与旗标，不用上游 Makefile。
+
+**目标是把补丁压到最小**：补丁越少，跟进上游越容易。

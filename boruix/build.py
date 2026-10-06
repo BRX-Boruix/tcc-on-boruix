@@ -23,7 +23,12 @@ SRC = os.path.dirname(HERE)          # 上游 tcc 源码树根
 BUILD = os.path.join(SRC, "_build")
 
 # 上游 Makefile 的 x86_64_FILES = CORE_FILES + x86_64-gen.c + x86_64-link.c + i386-asm.c
-CORE = ["tcc.c", "tcctools.c", "libtcc.c", "tccpp.c", "tccgen.c", "tccdbg.c",
+# 源文件清单 = 上游 x86_64_FILES **减去 tcctools.c**。
+#
+# 为什么减：`tcc.c` 会**无条件** `#include "tcctools.c"`（tcc.c:29），所以它不能再单独编一份，
+# 否则 duplicate symbol（实测 tcc_tool_ar/tcc_tool_cross/gen_makedeps）。上游 Makefile 的
+# `LIBTCC_SRC = $(filter-out tcc.c tcctools.c, ...)` 正是同一个道理。
+CORE = ["tcc.c", "libtcc.c", "tccpp.c", "tccgen.c", "tccdbg.c",
         "tccelf.c", "tccasm.c", "tccrun.c", "x86_64-gen.c", "x86_64-link.c", "i386-asm.c"]
 
 
@@ -50,7 +55,11 @@ def main():
     # 旗标与 sysroot 的 C 驱动保持一致，另加 tcc 自己的目标宏。
     cflags = ["--target=x86_64-unknown-none", "-ffreestanding", "-fno-builtin",
               "-fno-stack-protector", "-fno-pic", "-O2",
-              "-I", HERE, "-I", inc, "-DTCC_TARGET_X86_64"]
+              "-I", HERE, "-I", inc, "-DTCC_TARGET_X86_64",
+              # **-DONE_SOURCE=0 必须**：tcc.c 默认 ONE_SOURCE=1，会把其余 .c 文件 #include
+              # 进来；而我们把它们**分开**编译再链接 → 不关掉就会 duplicate symbol（实测）。
+              # 上游 Makefile 也是这么编 tcc.o 的（Makefile:240）。
+              "-DONE_SOURCE=0"]
     objs, bad = [], 0
     for f in CORE:
         o = os.path.join(BUILD, f[:-2] + ".o")
