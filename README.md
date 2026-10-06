@@ -4,8 +4,9 @@
 
 把 **TCC**（Tiny C Compiler）带到 BORUIX 上——让这个系统能**在自己内部**编译 C 程序。
 
-> **仓库状态：进行中。** 上游源码树已引入；**全部核心源文件已能编译并链接出 `tcc.elf`**（1170 KB）。
-> **尚未在 BORUIX 内运行**——下一步是把它送进 QEMU 跑通 `tcc hello.c -o hello && ./hello`。
+> **仓库状态：进行中。** 全部核心源文件已能编译并链接出 `tcc.elf`（1.17 MB）；**它已在 BORUIX 内运行**
+> （`tcc -v` 输出版本），且能**编译** `hello.c`（头文件生效、无编译错误）。
+> 卡在**链接**：tcc 找不到/不接受我们的 CRT 与库——见 [`boruix/CRT-AND-LIBS`](boruix/CRT-AND-LIBS)。
 
 ---
 

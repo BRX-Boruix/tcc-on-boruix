@@ -60,4 +60,10 @@
  * 只需改这一行 + 搬目录——这正是把它做成**单一配置点**的原因（不散落在别处）。 */
 #define CONFIG_TCCDIR "/volumes/BORUIX_DATA/3p/tcc"
 
+/* CRT 前缀：tcc 在这里找 `crt1.o` / `crti.o` / `crtn.o`（默认 `/usr/lib`，本系统没有）。
+ *
+ * BORUIX 的对应物与常规 POSIX 不同，见 `boruix/CRT-AND-LIBS` 的说明：
+ * `crt1.o` = 我们的入口桥接（提供 `user_main`、引用 `main`），`crti.o`/`crtn.o` 为空对象。 */
+#define CONFIG_TCC_CRTPREFIX "/volumes/BORUIX_DATA/3p/tcc"
+
 #endif /* _BORUIX_CONFIG_H */

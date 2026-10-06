@@ -1,0 +1,45 @@
+# CRT 与库：BORUIX 的对应物（3P6-1）
+
+tcc 链接一个程序时要找三类东西：CRT（`crt1.o`/`crti.o`/`crtn.o`）、`libtcc1.a`（编译器支持例程）、
+`libc`。BORUIX 的对应物与常规 POSIX **不一样**，这份文档说明映射关系与当前进度。
+
+## 三类东西在 BORUIX 上是什么
+
+| tcc 期望 | BORUIX 的对应物 | 现状 |
+| --- | --- | --- |
+| `crt1.o` | 我们的入口桥接（提供 `user_main`、引用 `main`）：`user_main.o` 或 `user_main_argv.o` | 已备（拷贝为 `crt1.o`） |
+| `crti.o` / `crtn.o` | **空对象**：常规 POSIX 里它们放 `.init`/`.fini` 前后缀，本系统没有该机制 | 已备（空 `.o`） |
+| `libtcc1.a` | 编译器支持例程（64 位除法、软浮点等） | **未备**——见下 |
+| `libc` | `<sysroot>/lib/libc.a`（含 libsys，入口 `_start` 就在里面） | 已备（拷贝到 tcc 目录） |
+
+## 当前卡点（2026-10-06，如实记录）
+
+在 BORUIX 内执行 `tcc /volumes/BORUIX_DATA/3p/hello.c -o .../hello`：
+
+1. **先报** `crt1.o` / `crti.o` **not found** —— 因为 `CONFIG_TCC_CRTPREFIX` 默认 `/usr/lib`，本系统没有该目录。
+2. 把 crt 对象与 `libc.a` 放进 tcc 目录、并设好 `CONFIG_TCC_CRTPREFIX` 之后，**改为报**：
+   ```text
+   /volumes/BORUIX_DATA/3p/tcc/crt1.o: error: invalid object file
+   /volumes/BORUIX_DATA/3p/tcc/crti.o: error: invalid object file
+   ```
+
+   tcc 的判定逻辑（`tccelf.c`）只有两种情况会给这条消息：
+   - 不是 `ET_REL` / 不是小端 / `e_machine` 不匹配；
+   - 或者**读到的字节数不足一个 ELF 头（64 字节）**。
+
+   宿主机上这两个对象经 `llvm-readelf` 确认是**合法 ELF64 REL**，故第一条不成立。
+   因此嫌疑落在**第二条**：盘上那份文件内容不完整。
+
+   **但尚未证实**：我试图直接在宿主机的 `disk.img` 里搜指纹来判定，
+   **该测量无效**（75 MB 的镜像经 `FileStream` 读回 0 字节；工具层对二进制大文件的读取不可靠）。
+   **所以目前不知道盘上内容是否完整——不要据此下结论。**
+
+## 下一步（下一轮）
+
+从 **BORUIX 内部**判定，而不是靠宿主机读镜像：写一个几行的探针程序，读
+`/volumes/BORUIX_DATA/3p/tcc/crt1.o` 并打印**读到的字节数与头 16 字节**。
+这能一次性区分「盘上内容不完整」与「tcc 读取器不接受 clang 产物」。
+
+之后无论哪一支，都要继续处理 `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）与
+**链接布局**（本内核要求 `PT_LOAD` 页对齐、无 RELRO 拆页；tcc 的内部链接器未必默认满足，
+可能需要 `-Ttext` 之类的约束，或改用它调外部链接器）。
