@@ -51,4 +51,13 @@
  * 上游补丁位置见 `boruix/UPSTREAM-PATCHES`。 */
 #define CONFIG_TCC_BORUIX 1
 
+/* tcc 自己的安装目录：它在这里找 `include/`（目标头文件）与 `libtcc1.a`（支持例程）。
+ *
+ * `{B}` 在 tcc.h 里会被替换成这个值（也即运行期 `-B` 选项的默认值）。
+ *
+ * **为什么是数据盘路径**：BORUIX 目前**没有 `/usr`**（liveCD 只有 `/programs` 放内建程序），
+ * 故移植阶段把 tcc 的运行时资产放在数据盘的 `/3p/tcc` 下。等系统有了真正的 `/usr`，
+ * 只需改这一行 + 搬目录——这正是把它做成**单一配置点**的原因（不散落在别处）。 */
+#define CONFIG_TCCDIR "/volumes/BORUIX_DATA/3p/tcc"
+
 #endif /* _BORUIX_CONFIG_H */

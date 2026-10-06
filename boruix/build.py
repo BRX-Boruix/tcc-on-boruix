@@ -80,8 +80,12 @@ def main():
     if a.compile_only:
         return 0
     out = os.path.join(BUILD, "tcc.elf")
+    # **用 user_main_argv.o 而不是 user_main.o**：tcc 是第三方程序，假定标准 POSIX argv
+    # 数组（逐个解析 argv[1..]）。而 BORUIX 原生 ABI 是 argc=1、argv[0]=整条命令行，
+    # 直接用会让 tcc"看不到任何参数"（实测：静默退出 0、无输出）。
+    # 该桥接把命令行拆成真 argv；见 csrc/user_main_argv.c 的说明。
     cmd = [lld, "-o", out, "-e", "_start", "-nostdlib", "--no-dynamic-linker",
-           os.path.join(lib, "user_main.o")] + objs + [
+           os.path.join(lib, "user_main_argv.o")] + objs + [
            os.path.join(lib, "libc.a"), "-z", "noexecstack", "-z", "norelro",
            "-T", os.path.join(lib, "linker.ld")]
     r = subprocess.run(cmd, capture_output=True, text=True)
