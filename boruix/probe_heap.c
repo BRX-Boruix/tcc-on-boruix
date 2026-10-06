@@ -9,8 +9,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <boruix.h>
 
 int main(void) {
+    /* 打开堆增长诊断：输出 [C/<pid>] 与 [L/<pid>] 行。
+     * 必须带 pid 看——串口日志是多进程交织的，不带 pid 会把不同进程的第一段
+     * 误读成同一进程重复（上一轮就是这么读错的）。 */
+    boruix_heap_diag(1);
+    printf("pid=%d 打开堆诊断\n", (int)0);
     unsigned long total = 0;
     const unsigned long CHUNK = 1024UL * 1024UL;
     int i;
