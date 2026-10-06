@@ -1,0 +1,22 @@
+# 上游来源（vendored upstream）
+
+本仓库根的 tcc 源码树**克隆自上游**，不是本项目的代码。
+
+  remote : https://github.com/TinyCC/tinycc.git   （上游官方在 https://repo.or.cz/tinycc.git）
+  commit : 43c7708
+  date   : 2026-10-03
+
+## 为什么把源码树放进仓库（而不是 submodule）
+
+沿用 `gcc-on-boruix` README 里定下的约定：这类"把某编译器带到 BORUIX"的仓，源码树**克隆进来**，
+再加 BORUIX 相关的移植部分。好处是仓库自包含——构建不依赖额外的网络取源码步骤。
+
+## 代价与再同步
+
+代价是**失去了直接 rebase 上游的能力**。要跟进上游时：
+
+  1. 另找目录 `git clone --depth 1 https://github.com/TinyCC/tinycc.git`；
+  2. 用 `git diff --no-index` 对比，人工挑选要带入的改动；
+  3. 更新本文件的 commit 与 date。
+
+移植相关的文件都在 `boruix/` 下，与上游文件**不混放**，因此"哪些是我们写的"一目了然。
