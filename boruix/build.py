@@ -60,6 +60,14 @@ def main():
               # 进来；而我们把它们**分开**编译再链接 → 不关掉就会 duplicate symbol（实测）。
               # 上游 Makefile 也是这么编 tcc.o 的（Makefile:240）。
               "-DONE_SOURCE=0"]
+    # BORUIX_AUTOINIT_ZERO=1：用 clang 把自动变量确定性地清零。
+    #
+    # 用途：tcc 在系统内加载多个对象时会**不确定地**崩溃（加几条 write 就改变行为）。
+    # 这是未定义行为的特征。把自动变量清零可以让「未初始化读」变得确定：
+    # 若崩溃随之消失/改变，就说明问题是**未初始化内存**；若照旧，则更可能是**越界**。
+    # 默认不开——它不是产品配置，是定位手段。
+    if os.environ.get("BORUIX_AUTOINIT_ZERO"):
+        cflags.append("-ftrivial-auto-var-init=zero")
     objs, bad = [], 0
     for f in CORE:
         o = os.path.join(BUILD, f[:-2] + ".o")
