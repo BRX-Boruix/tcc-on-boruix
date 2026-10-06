@@ -1016,6 +1016,42 @@ C 标准允许 `malloc(0)` 返回 NULL，但 **glibc 返回可用的非空指针
 `fault_addr` **恰好等于 `emit_str` 自身的地址** -> `MemSink.buf` 指向了代码 ->
 **这是完全发生在 libc 内部的缺陷**（`sprintf`/`snprintf` 路径），不涉及 tcc 的代码。
 
+## 根因三 + 根因四（2026-10-06 第 28-29 次）
+
+### 根因三：`sprintf` 的 `usize::MAX` 违反切片契约（已修）
+
+```rust
+  pub unsafe extern "C" fn sprintf(buf, fmt, ap) -> c_int {
+      vsnprintf(buf, usize::MAX, fmt, ...)      /* 用 usize::MAX 当 size */
+  }
+  // -> vformat_mem: MemSink { buf: from_raw_parts_mut(buf, cap) }   // cap = usize::MAX
+```
+
+`slice::from_raw_parts_mut` 的契约要求 `len <= isize::MAX`，传 `usize::MAX` 是 **UB**；
+而且 `MemSink::write` 的边界检查 `self.pos < self.buf.len()` 因此**形同虚设**，
+写出缓冲区一路写到**代码段**才崩——内核留证 `fault_addr` 落在 `emit_str` 的代码里、`err=0x7`（用户态写）。
+
+**修法**：把上界收敛到 `isize::MAX`（满足切片契约，同时保持 `sprintf` 实际上无界的语义）。
+修复后崩溃点再次**前移**。
+
+### 根因四（当前卡点）：`set_elf_sym` 里的野指针读
+
+```text
+  [fatal] ... fault_addr=0xfffffff523110e70 rip=0x42db2f ret=0x7ffeffffd990 err=0x4
+  符号化: 0x42db2f -> set_elf_sym
+```
+`err=0x4`（用户态**读**）、`fault_addr` 是巨大的垃圾地址 -> **野指针读**。
+
+`set_elf_sym`（`tccelf.c:706`）第 720 行调用 `find_elf_sym(s, name)`；`find_elf_sym` 很可能被
+**内联**进 `set_elf_sym`，而它读的正是 `name`——由调用方算出的 `strtab + sym->st_name`。
+`strtab` 在 `tcc_load_object_file` 里初值为 NULL、遇到 `SHT_SYMTAB` 才赋值，
+**所以要看是否存在「有符号但没有 strtab 链接」的路径**。
+
+### 进展的形态
+
+本轮连续修掉两个真实缺陷，**每次修复都让崩溃点前移**（空指针读 -> 写只读代码段 -> 野指针读），
+这是「确实在收敛」的证据，不是随机漂移。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；
