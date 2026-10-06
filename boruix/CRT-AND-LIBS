@@ -891,6 +891,47 @@ stdout 有缓冲，崩溃时缓冲会丢，最后一行证据就没了）。**�
 在运行期**验证不变式**：在那次 `memcpy` 之前打印 `s->data_offset` 与 `s->data_allocated`。
 内核现在会打出错地址与出错指令，**每次迭代都便宜**——这正是补上观测的价值。
 
+## `sort_syms` 被实测排除；`memcpy` 指向 libc（2026-10-06 第 24 次）
+
+### 不变式探针的结果：`sort_syms` **根本没被调用**
+
+在 `sort_syms` 那次 `memcpy` 之前加了探针（打印 `data_offset` / `data_allocated`）：
+
+```text
+  （0 条 [SYM] 行）
+  tcc: error: unresolved reference to ...      <- 正常的未定义符号报错
+  [init] run exited with code 1                <- 干净退出，没崩
+```
+
+**探针一行都没打** -> `sort_syms` 没被调用：tcc 在**符号检查**阶段就报错退出了，
+**没走到链接输出**。而 round 27/28 那次崩溃**没有**报未定义符号 -> 它崩在**更早**的位置。
+
+**结论：`sort_syms` 不是凶手**（上一轮的候选被实测排除）。
+（顺带：加这几行探针又让崩溃消失了——布局敏感的老问题。）
+
+### tcc 侧的 `memcpy` 全部排除（逐一读过）
+
+| 位置 | 判断 |
+| --- | --- |
+| `libtcc.c:185 pstrncpy` | 有上游 bug（`buf_size==0` 时 `num = SIZE_MAX`），但**全树没有任何调用点** |
+| `libtcc.c:818` | 只在**编译字符串**（`fd == -1`）时走，不是我们的路径 |
+| `tccelf.c:907 sort_syms` | 本次实测**未被调用** |
+
+**所以 `memcpy` 在 libc 里**——我们 `realloc` 搬迁分支的 `copy_nonoverlapping` 正是 `memcpy`。
+
+### 一个关键洞察（也解释了自检为什么没抓到）
+
+我加的契约自检用的是**同一个** `payload_capacity()`。**若这个辅助函数本身把容量算大**，
+那么**自检与拷贝会被一起骗过**——自检不会响，拷贝照样越界。
+
+已读 `payload_capacity` / `user_size` / `write_canary`（`libc/src/malloc.rs:78-98`）：
+三者的口径是自洽的（容量含 canary 区、用户可用 = 容量 - CANARY_SIZE）。**所以这条也未确认。**
+
+### 下一步
+
+1. 把契约自检**收紧**：应比较 `user_size(cap) >= 请求字节数`（`cap` 含 canary 区，口径偏松）；
+2. 在 `realloc` 搬迁分支打印**源/目标容量与实际拷贝长度**，看是否有一次拷贝超出目标块。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；

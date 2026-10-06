@@ -868,6 +868,9 @@ static void update_relocs(TCCState *s1, Section *s, int *old_to_new_syms, int fi
    the global and weak ones. Since TCC cannot sort it while generating
    the code, we must do it after. All the relocation tables are also
    modified to take into account the symbol table sorting */
+/* 对象/符号加载跟踪开关（默认关闭；TCC_DIAG_SEC=1 打开）。定义在文件后部。 */
+static int diag_sec_on(void);
+
 static void sort_syms(TCCState *s1, Section *s)
 {
     int *old_to_new_syms;
@@ -903,6 +906,16 @@ static void sort_syms(TCCState *s1, Section *s)
         p++;
     }
 
+    /* 不变式探针：上游依赖 data_offset <= data_allocated（唯一维护点是 section_add）。
+     * 这里把两者打出来——若 data_offset > data_allocated，下面那次 memcpy 就越界。 */
+    if (diag_sec_on()) {
+        char _db[96];
+        int _dn = snprintf(_db, sizeof(_db),
+                           "[SYM] data_offset=%d data_allocated=%d nb_syms=%d\n",
+                           (int)s->data_offset, (int)s->data_allocated, nb_syms);
+        if (_dn > 0)
+            write(1, _db, _dn);
+    }
     /* we copy the new symbols to the old */
     memcpy(s->data, new_syms, nb_syms * sizeof(ElfW(Sym)));
     tcc_free(new_syms);
