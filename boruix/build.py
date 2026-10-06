@@ -74,10 +74,16 @@ def main():
     # 按文件二分就能定位到源文件；逐文件编译的循环让这件事很便宜。
     autoinit_files = [x.strip() for x in
                       (os.environ.get("BORUIX_AUTOINIT_FILES") or "").split(",") if x.strip()]
+    # BORUIX_AUTOINIT_MODE=zero|pattern（默认 zero）。
+    #
+    # zero 只说明「清零就没事」；pattern 把垃圾值填成**确定的非零模式**，
+    # 让「读到未初始化内存」的崩溃变成**每次都发生、位置固定**，才便于定位。
+    autoinit_mode = os.environ.get("BORUIX_AUTOINIT_MODE") or "zero"
+    autoinit_flag = "-ftrivial-auto-var-init=" + autoinit_mode
     objs, bad = [], 0
     for f in CORE:
         o = os.path.join(BUILD, f[:-2] + ".o")
-        cf = cflags + (["-ftrivial-auto-var-init=zero"] if f in autoinit_files else [])
+        cf = cflags + ([autoinit_flag] if f in autoinit_files else [])
         r = subprocess.run([cc] + cf + ["-c", os.path.join(SRC, f), "-o", o],
                            capture_output=True, text=True)
         if r.returncode != 0:
