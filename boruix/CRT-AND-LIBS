@@ -400,6 +400,45 @@ BORUIX 内 `tcc hello.c -o .../hello`：**编译通过**（头文件生效、无
 - 内核 `brk` 语义正确（探针实测）；
 - 崩溃点低于配额，且 `[L]` 行显示 buddy 期间**没有**再增长（说明 Rust 侧分配都落在最初那 64KB 内）。
 
+## 突破（2026-10-06 第 11 次）：`cstr_to_str` 的 `Box::leak` 就是真因
+
+### 修复
+
+`libc/src/stdio.rs::cstr_to_str` 旧实现把 C 字符串复制进 Rust `Vec`、再 `Box::leak` 成 `'static`：
+**每一次路径转换都在 Rust 侧分配一块并泄漏**。改成**零分配**——直接在 C 字符串本身上取切片
+（长度 = 到 NUL 为止）。约 20 个调用点**无需改动**即编译通过（签名改为显式生命周期 + Safety 说明）。
+
+### 实测效果（交替探针，此前必崩）
+
+```text
+  #48 addr=0x103040010 头ok 尾ok 累计=50176KB
+  #54 malloc 失败 errno=12, 累计 55296 KB
+  循环结束: i=54 累计=55296 KB
+  [init] run exited with code 0        <- 干净成功（此前是 SIGSEGV）
+```
+
+**交替探针从「~46MB 处 SIGSEGV」变成「干净跑到配额上限 55,296KB 并正常退出」。**
+全量回归通过（8446 行）。
+
+### 但 tcc 仍然崩
+
+重链 `tcc.elf` 后重跑：仍然是 `-> hello.c` 之后 SIGSEGV。原因清楚——**同一类问题还有别处**：
+
+`printf`/`puts` 路径每次调用都 `cstr_to_bytes`（复制成 Rust `Vec`）：
+`stdio.rs` 的 821 / 839 / 853 / 989 / 1234 行等。tcc 会做**大量** `printf`/`fprintf`，
+于是 Rust 侧分配仍然与 C 侧 `malloc` 交替。
+
+### 机制仍未完全解释（如实声明）
+
+「为什么 Rust 侧分配与 C 侧 `malloc` 交替会破坏 buddy 的 free_list」——**尚未解释**。
+本轮是靠**实测**确认修复有效的（交替探针由崩转通），不是靠推理。机制留待后续；
+但修复本身已验证。
+
+### 下一步
+
+把 `printf`/`puts` 路径也改成**零分配**（借字节切片而不是复制成 `Vec`）——这与
+`cstr_to_str` 的修法同构，也是 3P6-2「libc 宽度/质量」的正当内容。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；
