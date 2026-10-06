@@ -1623,3 +1623,33 @@ v9 的 asm 用 `%r8` 存一个**独立硬上界**（`off+count`），循环条�
 在 **#PF 与 IRQ0 的入口/返回**各 dump **整帧**（`rip/cs/rflags/rsp/ss` + 15 GPR，零分配
 `write`，内核侧临时开启），跑 v9 探针（它现在**不会崩**，便于逐次观察），找出**哪一次
 进入/返回**把 `rdx` 改成了 0x318010；随后追那个值在内核里的来源。
+
+### 第 48 次：内核侧 dump 用户 #PF 现场——**循环期间一次 #PF 都没有**，rdx 仍被污染
+
+在 `interrupt_dispatch` 的用户 #PF 分支入口加一行 `raw_serial_fmt`（零分配、无锁，与致命诊断
+同一条裸串口旁路），dump `rip/rcx/rdx/rsp/cr2`，再跑 v9：
+
+```text
+[PFD] rip=0x402f6b rcx=0x0 rdx=0x10000 rsp=0x7ffeffffd570 cr2=0x100000000
+[PFD] rip=0x40363f rcx=0x0 rdx=0x200   rsp=0x7ffeffffd560 cr2=0x100008000
+[PFD] rip=0x4049d4 rcx=0x54  rdx=0x7ffeffffd309 rsp=0x7ffeffffcfb0 cr2=0x7ffeffffcfa8
+...
+[PFD] rip=0x405012 rcx=0x0   rdx=0x1     rsp=0x7ffeffffd920 cr2=0x100008000
+[PF9] rdi=100000010 (buf=100000010) rcx=400083 (expect 400000) rdx=394010 (expect 0) MISMATCH
+```
+
+**两条关键事实**：
+
+1. **71 条 `[PFD]` 全部来自循环之前的阶段**（`rip` 都在 libc/printf/malloc 区，`cr2` 是堆首
+   或用户栈）；**循环体（`rip=0x400071`）一次 #PF 都没有** ⇒ **那 4 MiB 堆块在循环开始时
+   已经全部映射**（`malloc`/`brk` 之后并非"未触碰"——要么 `brk` 会预映射/清零新区，
+   要么这些页被别的路径先触碰过）。**这推翻了"必须靠 #PF 才触发"的前提。**
+2. **即使没有 #PF，`rdx` 仍被污染**（本次终值 `0x394010`，上次 `0x318010`）⇒
+   **触发条件与按需补页无关。**
+
+**⇒ 唯一还能打断这个纯用户态写循环的，只剩定时器（IRQ0）。**
+⇒ 下一步的嫌疑面从"#PF 补页路径"整体转向 **`tick`/调度切换路径**。
+
+**下一步（唯一入口）**：把同样的 dump 挂到 **IRQ0 入口/返回**（`tick` 被调用前后），跑 v9
+逐次对比——找出**哪一次 IRQ0** 返回后 `rdx` 已经不对。重点查 `tick` 里
+`slot.saved = *frame` 与 `*frame = slot.saved` 这一对是否可能被**跨核/跨桶**的保存覆盖。
