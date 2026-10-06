@@ -864,6 +864,33 @@ stdout 有缓冲，崩溃时缓冲会丢，最后一行证据就没了）。**�
 以及我们 `realloc` 搬迁分支里那次 `copy_nonoverlapping`（`copy_len = min(user_size(old_cap), new_size)`）。
 **每次重新构建后 `rip` 都会变，符号化必须用当次构建的二进制。**
 
+## 越界写候选：`sort_syms` 的 `memcpy`（2026-10-06 第 23 次）
+
+按内核留证（`memcpy` + 用户态写不存在的页）逐个核对对象加载/输出路径上的 `memcpy`，
+最可疑的一处是 `tccelf.c:871` 的 `sort_syms()`：
+
+```c
+  nb_syms = s->data_offset / sizeof(ElfW(Sym));
+  new_syms = tcc_malloc(nb_syms * sizeof(ElfW(Sym)));
+  ... 两趟把符号按「局部在前」重排到 new_syms ...
+  memcpy(s->data, new_syms, nb_syms * sizeof(ElfW(Sym)));   /* 写回 s->data，不重新分配 */
+```
+
+它把 `nb_syms` 个符号**写回 `s->data`**，却不给 `s->data` 扩容——上游依赖不变式
+**`data_offset <= data_allocated`**。
+
+**但该不变式看起来是成立的**：唯一的维护点是 `section_add`（`tccelf.c:319`），
+它在 `offset1 > sec->data_allocated` 时调用 `section_realloc`；`section_realloc` 又把容量
+按 2 的幂扩到 `>= new_size`。`symtab_section` 是 `SHT_SYMTAB`，不走 `SHT_NOBITS` 的豁免分支。
+
+**所以我不下「就是这里」的结论。** 但时机吻合：本次崩溃发生在 `hello.c` **之后**，
+即进入**链接/输出**阶段，而 `sort_syms` 正是在那里跑。
+
+### 下一步
+
+在运行期**验证不变式**：在那次 `memcpy` 之前打印 `s->data_offset` 与 `s->data_allocated`。
+内核现在会打出错地址与出错指令，**每次迭代都便宜**——这正是补上观测的价值。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；
