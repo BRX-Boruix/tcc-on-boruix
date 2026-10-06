@@ -1,37 +1,50 @@
-/* probe_pf_rcx.c v4 —— 3P6-1 根因五：判别"是 libsys 的 memset 特有，还是任何跨新页的循环都会崩"。
+/* probe_pf_rcx.c v7 —— 3P6-1 根因五：把"跨页次数"提到 memset 的量级（约 1024 次）。
  *
- * v3 事实：malloc(4MiB) 之后**紧跟** memset（中间无任何调用）必崩，
- *          fault = buf + <memset 存储指令地址>。
- * v4 用 C 的 volatile 逐字节循环触碰同一块新内存（编译器不会向量化、也不会换成 memset），
- *    并核对循环计数是否走完：
- *      - 若**它也崩** → 与 memset 实现无关，是"任何跨大量新页的循环"都会中招；
- *      - 若它**正常走完** → 只剩 libsys 的 memset 这一条路（或它用的那个寄存器）。
- *    之后再对**已全部驻留**的同一块做一次 memset（此时不可能有 #PF），作为正向对照。
+ * 已确证的事实：
+ *   v4：C volatile 循环（计数器不在 rcx）跨约 1024 次 #PF -> **正常**；
+ *   v5/v6：asm 循环（计数器在 rcx）跨 1 次 / 17 次 #PF -> **rcx 正确恢复**；
+ *   v2：libsys memset（计数器在 rcx）跨约 1024 次 #PF -> **崩**（fault = buf + rip）。
+ *
+ * v7 用**同一个 asm 循环**把跨度提到约 1024 页（从偏移 0x10 起写 4MiB-0x10），
+ * 计数器仍在 rcx。这样把"寄存器"与"跨页次数"两个变量彻底分开：
+ *   - 若崩 -> 触发条件是"**rcx 计数 + 上千次 #PF**"（寄存器+规模），与 memset 实现无关；
+ *   - 若正常 -> 触发条件只剩 memset 这个函数本身（调用约定/代码形状）。
  */
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+
+static unsigned long write_span(unsigned char *base, unsigned long off, unsigned long count)
+{
+    unsigned long out = 0;
+    __asm__ __volatile__(
+        "mov %[b], %%rdi\n\t"
+        "mov %[o], %%rcx\n\t"
+        "mov $0x5a, %%sil\n\t"
+        "1:\n\t"
+        "movb %%sil, (%%rdi,%%rcx)\n\t"
+        "incq %%rcx\n\t"
+        "cmpq %[end], %%rcx\n\t"
+        "jb 1b\n\t"
+        "mov %%rcx, %[out]\n\t"
+        : [out] "=r"(out)
+        : [b] "r"(base), [o] "r"(off), [end] "r"(off + count)
+        : "rdi", "rcx", "rsi", "memory");
+    return out;
+}
 
 int main(void) {
     const unsigned long n = 4ul * 1024 * 1024;
     unsigned char *b = (unsigned char *)malloc(n);
     if (!b) {
-        printf("[PF4] malloc failed\n");
+        printf("[PF7] malloc failed\n");
         return 1;
     }
-    printf("[PF4] volatile touch loop: %lu bytes at %p\n", n, (void *)b);
+    printf("[PF7] buf=%p\n", (void *)b);
 
-    volatile unsigned char *v = b;
-    unsigned long i;
-    for (i = 0; i < n; i++) {
-        v[i] = 0x5a;
-    }
-    printf("[PF4] volatile loop done i=%lu (expect %lu) %s\n",
-           i, n, (i == n) ? "COUNTER-OK" : "COUNTER-BAD");
-    printf("[PF4] first=%d last=%d\n", b[0], b[n - 1]);
+    unsigned long e1 = write_span(b, 0x10, n - 0x10);   /* 约 1024 个页边界 */
+    printf("[PF7] span1024 rcx=%lx expect=%lx %s\n", e1, n,
+           (e1 == n) ? "RCX-RESTORED" : "RCX-CLOBBERED");
 
-    memset(b, 0xa5, n);   /* 整块已驻留：此时不应有任何 #PF */
-    printf("[PF4] memset-after-touch ok first=%d last=%d\n", b[0], b[n - 1]);
-    printf("[PF4] all done\n");
+    printf("[PF7] all done\n");
     return 0;
 }
