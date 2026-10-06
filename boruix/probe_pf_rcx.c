@@ -1,35 +1,37 @@
-/* probe_pf_rcx.c v3 —— 3P6-1 根因五：判定"printf 前后 callee-saved 寄存器是否被破坏"。
+/* probe_pf_rcx.c v4 —— 3P6-1 根因五：判别"是 libsys 的 memset 特有，还是任何跨新页的循环都会崩"。
  *
- * v2 事实：`malloc(4MiB)` 后紧跟 `memset` 会崩，fault = buf + <memset 存储指令地址>；
- *          而反汇编显示 main 把 buf 放在 **%rbx**（callee-saved）里，printf 之后
- *          直接 `movq %rbx, %rdi; call memset`。若 %rbx 被 printf 破坏，rdi 就是垃圾。
- *          同时"哨兵 rcx 跨 16 次 #PF"是 OK 的 —— 所以不是 #PF 破坏 rcx。
- *
- * v3 用**对照实验**判定：同一形态做两次，唯一差别是"memset 之前有没有 printf"。
- *   第一次：malloc -> memset（中间无任何调用）
- *   第二次：malloc -> printf -> memset
- * 若第一次过、第二次崩 ⇒ printf（或其调用链）破坏了 callee-saved 寄存器。
+ * v3 事实：malloc(4MiB) 之后**紧跟** memset（中间无任何调用）必崩，
+ *          fault = buf + <memset 存储指令地址>。
+ * v4 用 C 的 volatile 逐字节循环触碰同一块新内存（编译器不会向量化、也不会换成 memset），
+ *    并核对循环计数是否走完：
+ *      - 若**它也崩** → 与 memset 实现无关，是"任何跨大量新页的循环"都会中招；
+ *      - 若它**正常走完** → 只剩 libsys 的 memset 这一条路（或它用的那个寄存器）。
+ *    之后再对**已全部驻留**的同一块做一次 memset（此时不可能有 #PF），作为正向对照。
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define N (4ul * 1024 * 1024)
-
 int main(void) {
-    /* ---- 第一次：memset 之前**没有任何调用** ---- */
-    unsigned char *a = (unsigned char *)malloc(N);
-    if (!a) { printf("[PF3] malloc a failed\n"); return 1; }
-    memset(a, 0x5a, N);
-    printf("[PF3] A(no-call-before) ok first=%d last=%d\n", a[0], a[N - 1]);
+    const unsigned long n = 4ul * 1024 * 1024;
+    unsigned char *b = (unsigned char *)malloc(n);
+    if (!b) {
+        printf("[PF4] malloc failed\n");
+        return 1;
+    }
+    printf("[PF4] volatile touch loop: %lu bytes at %p\n", n, (void *)b);
 
-    /* ---- 第二次：同样形态，但 memset 之前插一次 printf ---- */
-    unsigned char *b = (unsigned char *)malloc(N);
-    if (!b) { printf("[PF3] malloc b failed\n"); return 1; }
-    printf("[PF3] B buf=%p n=%lu ...\n", (void *)b, N);
-    memset(b, 0x5a, N);
-    printf("[PF3] B(with-printf-before) ok first=%d last=%d\n", b[0], b[N - 1]);
+    volatile unsigned char *v = b;
+    unsigned long i;
+    for (i = 0; i < n; i++) {
+        v[i] = 0x5a;
+    }
+    printf("[PF4] volatile loop done i=%lu (expect %lu) %s\n",
+           i, n, (i == n) ? "COUNTER-OK" : "COUNTER-BAD");
+    printf("[PF4] first=%d last=%d\n", b[0], b[n - 1]);
 
-    printf("[PF3] all done\n");
+    memset(b, 0xa5, n);   /* 整块已驻留：此时不应有任何 #PF */
+    printf("[PF4] memset-after-touch ok first=%d last=%d\n", b[0], b[n - 1]);
+    printf("[PF4] all done\n");
     return 0;
 }
