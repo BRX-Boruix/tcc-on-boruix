@@ -4,8 +4,8 @@
 
 把 **TCC**（Tiny C Compiler）带到 BORUIX 上——让这个系统能**在自己内部**编译 C 程序。
 
-> **仓库状态：进行中。** 上游源码树已引入，移植工作已开始；12 个核心源文件里 **6 个已能编译通过**，
-> 其余 6 个卡在 libc 宽度缺口上（清单见下）。
+> **仓库状态：进行中。** 上游源码树已引入，移植工作已开始；12 个核心源文件里 **8 个已能编译通过**，
+> 其余 4 个只卡在 **2 个缺口**上（清单见下）。
 
 ---
 
@@ -50,19 +50,23 @@ python boruix/build.py --sysroot %BORUIX_SYSROOT%
 
 ## 当前进度
 
-已编译通过（6/12）：`tccgen.c`、`tccdbg.c`、`tccasm.c`、`x86_64-gen.c`、`x86_64-link.c`、`i386-asm.c`。
+已编译通过（8/12）：`tccpp.c`、`tccgen.c`、`tccdbg.c`、`tccelf.c`、`tccasm.c`、`x86_64-gen.c`、
+`x86_64-link.c`、`i386-asm.c`。
 
-仍卡在 libc 宽度上（**由真实编译报错导出，不是预猜**）：
+仍卡住的 **2 个**缺口（**由真实编译报错导出，不是预猜**）：
 
-| 缺口 | 类别 |
-| --- | --- |
-| `sys/ucontext.h` | 头文件（`tccrun.c` 的信号处理要用 `ucontext_t`） |
-| `environ` | 符号（`tccrun.c`） |
-| `struct tm` + `localtime` | 类型 + 函数（`tccpp.c` 的 `__DATE__`/`__TIME__`） |
-| `ldexpl` | 函数（`tccpp.c`） |
-| `strerror` | 函数 |
-| `remove` / `fdopen` / `freopen` | 函数（`tcctools.c`） |
-| `execvp` | 函数（`tcctools.c`） |
+| 缺口 | 类别 | 为何不是"补一个函数"那么简单 |
+| --- | --- | --- |
+| `sys/ucontext.h` | 头文件 | `ucontext_t` 必须与**内核投递信号时的帧布局**一致。已查实：libc 文档写明内核传
+  `rdx=0`——**ucontext 未实现**，而 `siginfo` 是 BORUIX 自己的 32 字节 `SigInfo`（字段 `sig`/`vector`/
+  `error_code`/`fault_addr`/`pid`），**不是** Linux 的 `siginfo_t` 布局。而 tcc 的 `rt_getcontext`
+  按 Linux 布局读 `uc_mcontext.gregs[REG_RIP]`、`sig_error` 读 `siginfo->si_code`。**需要一次明确取舍**。 |
+| `execvp` | 函数 | BORUIX **没有"替换当前进程映像"的 exec**——`libsys::exec_path` 走的是 `SYS_TASK_SPAWN`
+  （**派生**新进程并返回 pid），且本 ABI 的"命令行"是**单个字符串**而非 argv 数组。POSIX `execvp`
+  的语义（成功则不返回）在此**无法直接成立**。需要决定：如实不提供，还是给出明确标注的近似语义。 |
+
+本轮已补齐（使 6/12 → 8/12）：`strerror`、`struct tm` + `gmtime`/`localtime`、`ldexpl`（x87 汇编，
+因 Rust 无 `f80` 类型）、`fdopen`、`freopen`、`environ` + `getenv`（含 `csrc/user_main.c` 入口注册）。
 
 ## 诚实边界
 
