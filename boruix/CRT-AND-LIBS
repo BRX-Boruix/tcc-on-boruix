@@ -710,6 +710,35 @@ stdout 有缓冲，崩溃时缓冲会丢，最后一行证据就没了）。**�
 2. **改用 `-ftrivial-auto-var-init=pattern`**：未初始化值变成确定的非零模式，
    崩溃会**每次都发生且位置固定**，反而更容易观察——确定化之后再二分。
 
+## 按文件二分：未初始化变量在 **`libtcc.c`**（2026-10-06 第 19 次）
+
+给构建脚本加了 `BORUIX_AUTOINIT_FILES=tccelf.c[,其它]`——**只对这些文件**加自动变量清零。
+既然「全量清零 -> 崩溃消失」，按文件二分就能定位到源文件。
+
+| 清零范围 | 结果 |
+| --- | --- |
+| 全部 11 个文件 | **不崩**（干净报错） |
+| 只 `tccelf.c` | **仍崩** |
+| 只 `libtcc.c` | **不崩**（干净报错） |
+
+**结论：未初始化的栈变量在 `libtcc.c` 里**——范围从 11 个文件缩到 1 个。
+
+（崩溃**现场**在 `tccelf.c::tcc_load_object_file`，但变量本身在 `libtcc.c`：
+说明它是被调用函数里的栈变量，其垃圾值影响了调用方的判断。）
+
+### 已排除的具体位置
+
+- `default_reallocator`（`libtcc.c:245`）：`ptr1` 两个分支都赋了值；
+- `tcc_malloc`/`tcc_realloc`/`tcc_mallocz`/`tcc_free`（`libtcc.c:286-308`）：都是平凡转发；
+- `reallocator`（`libtcc.c:272`）：有初值 `default_reallocator`；
+- `tcc_add_file_internal`（`libtcc.c:1218`）：局部只有 `int fd`，已赋值。
+
+### 下一步
+
+改用 **`-ftrivial-auto-var-init=pattern`**（对 `libtcc.c`）：垃圾值变成**确定的非零模式**，
+崩溃会**每次都发生且位置固定**——先让它确定，再在 `libtcc.c` 里找那个变量。
+（`=zero` 只说明「清零就没事」，`=pattern` 才能让坏值可辨认。）
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；

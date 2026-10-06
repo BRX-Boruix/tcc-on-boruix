@@ -68,10 +68,17 @@ def main():
     # 默认不开——它不是产品配置，是定位手段。
     if os.environ.get("BORUIX_AUTOINIT_ZERO"):
         cflags.append("-ftrivial-auto-var-init=zero")
+    # BORUIX_AUTOINIT_FILES=tccelf.c[,其它]：只对这些文件加清零。
+    #
+    # 用途：已确认崩溃源于「未初始化内存」（全量清零即消失），但还没定位到哪个变量。
+    # 按文件二分就能定位到源文件；逐文件编译的循环让这件事很便宜。
+    autoinit_files = [x.strip() for x in
+                      (os.environ.get("BORUIX_AUTOINIT_FILES") or "").split(",") if x.strip()]
     objs, bad = [], 0
     for f in CORE:
         o = os.path.join(BUILD, f[:-2] + ".o")
-        r = subprocess.run([cc] + cflags + ["-c", os.path.join(SRC, f), "-o", o],
+        cf = cflags + (["-ftrivial-auto-var-init=zero"] if f in autoinit_files else [])
+        r = subprocess.run([cc] + cf + ["-c", os.path.join(SRC, f), "-o", o],
                            capture_output=True, text=True)
         if r.returncode != 0:
             bad += 1
