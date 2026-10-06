@@ -3266,7 +3266,21 @@ ST_FUNC void *load_data(int fd, unsigned long file_offset, unsigned long size)
     void *data;
     ssize_t got;
 
-    data = tcc_malloc(size);
+    /* 上游缺陷（本移植修补，见 boruix/UPSTREAM-PATCHES）：
+     *
+     * 1) `size == 0` 时 `tcc_malloc(0)` 经 `default_reallocator` **直接返回 NULL**
+     *    （它显式 `if (size == 0) { free(ptr); ptr1 = NULL; }`），于是 `full_read`
+     *    对着 NULL 缓冲读、调用方又把这个 NULL 当指针用。实测：对象加载时
+     *    `strsec = load_data(..., 0)` 得到 NULL，随后 `strncmp(strsec + sh_name, ...)`
+     *    读空指针崩溃（内核留证 fault_addr=0x0、errno=22/EINVAL）。
+     *    ——零长也分配一个字节，保证返回**非空**。
+     *
+     * 2) `full_read` 的返回值被丢弃：短读/读失败时缓冲区内容未定义，
+     *    随后被当作节表/字符串表使用（本函数下方补了留证）。
+     */
+    data = tcc_malloc(size ? size : 1);
+    if (!data)
+        return NULL;
     lseek(fd, file_offset, SEEK_SET);
     /* 上游此处**丢弃** full_read 的返回值：一旦短读，缓冲区尾部就是未初始化的，
      * 随后被当作节表/符号表/字符串表使用（对象加载路径上到处是 load_data）。
@@ -3274,10 +3288,12 @@ ST_FUNC void *load_data(int fd, unsigned long file_offset, unsigned long size)
      * 这不是行为改动（数据仍返回），是补上 S09 要求的留证。 */
     got = full_read(fd, data, size);
     if (got != (ssize_t)size) {
-        char _db[96];
+        extern long boruix_brk(unsigned long);
+        char _db[192];
         int _dn = snprintf(_db, sizeof(_db),
-                           "[SHORT] off=%lu want=%lu got=%ld\n",
-                           file_offset, size, (long)got);
+                           "[SHORT] off=%lu want=%lu got=%ld errno=%d data=%p brk=%p\n",
+                           file_offset, size, (long)got, errno, data,
+                           (void *)(unsigned long)boruix_brk(0));
         if (_dn > 0)
             write(1, _db, _dn);
     }
