@@ -3264,10 +3264,23 @@ ST_FUNC ssize_t full_read(int fd, void *buf, size_t count) {
 ST_FUNC void *load_data(int fd, unsigned long file_offset, unsigned long size)
 {
     void *data;
+    ssize_t got;
 
     data = tcc_malloc(size);
     lseek(fd, file_offset, SEEK_SET);
-    full_read(fd, data, size);
+    /* 上游此处**丢弃** full_read 的返回值：一旦短读，缓冲区尾部就是未初始化的，
+     * 随后被当作节表/符号表/字符串表使用（对象加载路径上到处是 load_data）。
+     * 本移植把它变成**会自报**的检查：短读时打一行，带请求量与实际量。
+     * 这不是行为改动（数据仍返回），是补上 S09 要求的留证。 */
+    got = full_read(fd, data, size);
+    if (got != (ssize_t)size) {
+        char _db[96];
+        int _dn = snprintf(_db, sizeof(_db),
+                           "[SHORT] off=%lu want=%lu got=%ld\n",
+                           file_offset, size, (long)got);
+        if (_dn > 0)
+            write(1, _db, _dn);
+    }
     return data;
 }
 
