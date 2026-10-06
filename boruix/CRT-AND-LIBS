@@ -172,6 +172,51 @@ BORUIX 内 `tcc hello.c -o .../hello`：**编译通过**（头文件生效、无
 定位 `brk` 为何失败：打印 `brk` 的返回值与失败时的 errno、统计已分配量；同时查内核
 `sys_brk` 的实现（是否与已有映射冲突、是否有隐含上界）。
 
+## 进展（2026-10-06 第 5 次）：memory full 的根因定位；但它不是最后一个障碍
+
+### 根因：单进程地址空间配额 = 物理内存 / 4
+
+内核 `mm/src/user_space.rs` 的设计（注释自陈，非我推断）：
+
+    全局承诺预算 = 物理内存 / 2      （overcommit_ratio 50% 同构）
+    单进程配额   = 全局预算 / 2      （防单进程默认独占）
+    => 单进程配额 = 物理内存 / 4      （比例化，绝不写死）
+
+**两处独立证据精确吻合**：
+
+- 探针 `boruix/probe_heap.c` 在 BORUIX 内实测：连续 malloc 1MB 到 **第 54 次**失败，
+  `errno=12 (ENOMEM)`，累计 **55,296 KB**；地址从 0x100010010（4 GiB，即 USER_HEAP_BASE）递增；
+  **首尾都真可写**——所以 malloc 本身是对的，是配额到顶；
+- 内核日志：`max phys addr: 0xdd3f000 (221 MB)` -> 221 / 4 ~= 55 MB，与实测**吻合**。
+
+（顺带确认：失败来自 `check_area_quota` 的 ENOMEM，不是堆与 mmap 区相撞的 AlreadyExists。）
+
+### `--mem` 选项早已存在
+
+`tools/tools_build/run.py` 的 `-m` 参数就是 `args.mem`——不需要改代码，只是此前都用默认 256。
+
+### 但提高内存后换了一种失败：SIGSEGV
+
+用 `--mem 1024`（配额约 256 MB）重跑：
+```text
+  tcc version 0.9.28-boruix (x86_64 Linux)
+  -> /volumes/BORUIX_DATA/3p/hello.c
+  退出码 11（SIGSEGV）
+```
+
+即：**内存上限不是最后一个障碍**——越过它之后还有另一种失败模式。
+
+### 下一步的首要嫌疑：堆与 mmap 区**同向增长**
+
+`user_space.rs` 里：
+```text
+  USER_HEAP_BASE = 0x1_0000_0000          （4 GiB，堆从这里向上长）
+  next_mmap      = USER_HEAP_BASE + 16MiB （mmap 游标也在这里向上长）
+```
+**两者同向、起点只差 16 MiB**。`brk` 扩展前会做重叠校验（撞上非堆区就返回 AlreadyExists），
+但 mmap 游标只有在**真的发生 mmap** 时才推进——所以一个「只 malloc、不 mmap」的程序能把堆
+推到 mmap 游标之上而不触发校验。这需要实测确认，不能只凭读代码下结论。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；
