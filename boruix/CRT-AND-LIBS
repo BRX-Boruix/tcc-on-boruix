@@ -217,6 +217,55 @@ BORUIX 内 `tcc hello.c -o .../hello`：**编译通过**（头文件生效、无
 但 mmap 游标只有在**真的发生 mmap** 时才推进——所以一个「只 malloc、不 mmap」的程序能把堆
 推到 mmap 游标之上而不触发校验。这需要实测确认，不能只凭读代码下结论。
 
+## 更正（2026-10-06 第 6 次）：上一轮的根因结论**不完整**
+
+上一轮我写「memory full 的根因 = 单进程配额（物理内存/4）」。**这个结论只解释了 256 MB 那一例**，
+提高内存后并不成立。如实更正如下。
+
+### 实测：提高配额**没有**抬高上限，反而更早卡住
+
+`--mem 1024`（配额约 256 MB）下跑同一个堆探针：
+
+- 内核日志确认内存变大：`max phys addr: 0x3dd3b000 (989 MB)`（原先 221 MB）；
+- 探针**仍然只到 #48（50,176 KB）就停住**——没有干净的 ENOMEM，没有走到循环结束，
+  运行**永不退出**（我手动终止了它）；
+- 而 256 MB 那一例是走到 **#54（55,296 KB）并干净地报 ENOMEM**。
+
+即：**内存上限不是唯一约束**，约 50 MB 附近还有另一道墙，而且越过去是**卡死**而不是报错。
+
+### 日志里抓到一个真实崩溃
+
+```text
+  [libsys] userspace panic: ...\buddy_system_allocator-0.9.1\src\lib.rs:130
+```
+
+读该 crate 源码（cargo 注册表里就有）第 130 行：
+```rust
+  self.free_list[class].pop().expect("current block should have free space now")
+```
+**buddy 堆的内部不变式被破坏**——这是**堆被写坏**的典型症状，不是普通的 OOM。
+
+### 一个被我自己推翻的猜测（如实记录）
+
+我先怀疑「libc 的 C `malloc` 与 libsys 的 Rust 全局分配器共用同一个 `brk`，互相覆盖」。
+查代码后**不成立**：
+
+- `libc/malloc.rs` 只在 `brk` **增长**（第 300/307 行），从不收缩；
+- `libsys/allocator.rs` 从 `Heap::empty()` 起，OOM 时 `brk` 增长并把**自己新拿到的那段**加入 buddy；
+- 两者**各自只管理自己取得的区域**，`brk` 单调增长 → **不重叠**。
+
+所以「共用 brk」本身不是 bug（虽仍是值得注意的结构：**同一地址空间里有两套堆分配器**）。
+
+### 下一步
+
+找**谁写坏了 buddy 堆**。候选（按可查性排序）：
+
+1. `libsys/allocator.rs` 第 105-130 行的增长路径：加入 buddy 的区域是否**对齐/长度**正确、
+   是否在真正可用之后才 `add_to_heap`；
+2. Rust 侧某处的越界写 / double free（buddy 的 free_list 被破坏通常由此而来）；
+3. 一个只 malloc、不 mmap 的程序把堆推到 `next_mmap` 游标之上是否真的安全
+   （`USER_HEAP_BASE` 与 `USER_HEAP_BASE + 16MiB` 同向增长，这条**仍未验证**）。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；
