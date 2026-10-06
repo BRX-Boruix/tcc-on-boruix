@@ -783,6 +783,50 @@ stdout 有缓冲，崩溃时缓冲会丢，最后一行证据就没了）。**�
 以及长度算错的 `memcpy`。另一个值得补的观测手段是**让内核打印致命错误的出错地址**——
 目前 tcc 崩溃时内核不打任何东西（这个可观测性缺口前面已记过一次）。
 
+## 补上可观测性 —— 立刻定位到 `memset`（2026-10-06 第 21 次）
+
+### 缺口与修复
+
+`kernel/src/syscall.rs` 的 `user_exception_signal_handler` 有三条**终止**路径，此前**都不打印任何东西**：
+进程只留一个退出码，出错地址（CR2）与出错指令（RIP）全丢。
+已加 `log_user_fatal()`，在这三条路径各打一行（只在**终止**时打，不会刷屏）：
+
+```text
+  [fatal] user exception -> terminate: sig= vector= fault_addr= rip= err= (原因)
+```
+
+这是**系统侧**的真实改进（S09：出错要留证），不是为了 tcc 特设的后门。
+
+### 它立刻给出了答案
+
+```text
+  [fatal] user exception -> terminate: sig=11 vector=14 fault_addr=0x1014294dc rip=0x4584cc err=0x6 (default/ignore)
+  符号化 0x4584cc -> 0x4584c2  memset（+0xa）
+```
+
+读法：
+
+- `err=0x6` = 0b110 = **P=0（页不存在）+ W=1（写）+ U=1（用户态）** -> **越界写**；
+- `fault_addr=0x1014294dc` ~= 堆基址 4GiB + 21MB -> **刚越过 `brk`**；
+- `rip` -> **`memset`** -> 某个 `memset(dst, 0, n)` 写过了界。
+
+**这一步把此前二十轮的行为分割压缩成了一次读数。**（也印证了那条教训：先补观测，再谈定位。）
+
+### 已读代码排除的路径
+
+`tcc_mallocz -> tcc_malloc -> reallocator(0,size) -> realloc(NULL,size)`，而：
+
+- 我们的 `malloc(size)` 分配 `size + CANARY_SIZE + HEADER`（并 16 字节对齐）；
+- `freelist_take(min)` **确实**校验 `sz >= min`（`libc/src/malloc.rs:275`）；
+- `heap_extend` 按 `need.max(64KB)` 扩展 `brk`。
+
+所以「普通 `memset(ptr,0,size)`」应当在界内——**问题不在这一条链上**。
+
+### 下一步
+
+枚举 tcc **对象加载路径**上的 `memset` 调用点（`tccelf.c` / `libtcc.c`），逐个核对长度计算。
+内核现在会打出错地址，**每次迭代都便宜**——这正是补上观测的价值。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；
