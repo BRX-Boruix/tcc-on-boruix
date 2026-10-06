@@ -82,6 +82,50 @@ BORUIX 内 `tcc hello.c -o .../hello`：**编译通过**（头文件生效、无
 若崩在链接期，首要嫌疑是**节类型**：clang 默认给对象加 `.llvm_addrsig`（非标准节类型
 `LLVM_ADDRSIG`），而 `libc.a` 里的对象全都带它——tcc 读归档成员时可能不认（`-fno-addrsig` 可抑制）。
 
+## 进展（2026-10-06 第 3 次）：**编译已通**，只剩链接
+
+### 修掉的 bug：`AT_EXECFN` 常量写错
+
+`csrc/user_main_argv.c` 里我把 `AT_EXECFN` 写成了 **15**，而标准（以及内核与 libsys 的单点
+`libsys::auxv::AT_EXECFN`）是 **31**——15 是 `AT_PLATFORM`。后果：桥接取程序名失败，
+`argv[0]` 成了坏指针（探针实测：打印 `argv[0]` 时 SIGSEGV）。
+
+**教训**：这类 ABI 常量必须**对着单点定义抄**，不能凭记忆——libsys 与 loader 里都写着 31。
+
+### 探针证明了桥接正确
+
+`boruix/probe_argv.c`（与 `user_main_argv.o` 链接）在 BORUIX 内输出：
+```text
+  argc = 6
+  argv[0] = [probe_argv.elf]      <- 真实程序名，来自 auxv AT_EXECFN
+  argv[1] = [-v]
+  argv[2] = [-c]
+  argv[3] = [/volumes/BORUIX_DATA/3p/hello.c]
+  argv[4] = [-o]
+  argv[5] = [/volumes/BORUIX_DATA/3p/hello.o]
+  done（退出码 0）
+```
+
+**为什么探针先打指针再解引用**：上一版探针直接 `%s` 打印，坏指针一崩就什么都不剩，白跑一次。
+先打指针值，即使后续崩掉也能看清是哪个位置坏。
+
+### 编译已通
+
+`tcc -v -c hello.c -o hello.o` 在 BORUIX 内**成功**：
+```text
+  tcc version 0.9.28-boruix (x86_64 Linux)
+  -> /volumes/BORUIX_DATA/3p/hello.c
+  <- /volumes/BORUIX_DATA/3p/hello.o
+  退出码 0
+```
+即：**一个第三方 C 编译器在系统内成功编译了一个 C 程序**。
+
+### 下一步：链接期 SIGSEGV
+
+不带 `-c`（即 `tcc hello.c -o hello`）时 tcc **静默段错误**（退出码 11）。已知的链接期需求：
+`libtcc1.a`（支持例程，未备）与**链接布局**（本内核要求 `PT_LOAD` 页对齐、无 RELRO 拆页）。
+诊断手段：`tcc -v hello.c -o hello` 会打印它实际调用的链接步骤。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；
