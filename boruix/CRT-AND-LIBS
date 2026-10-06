@@ -1262,3 +1262,38 @@ tcc 的 `load_data()` 因此拿到 `-1/EFAULT`，又**丢弃返回值**，缓冲
 `sec` 三元组。判据：
 - 若 `section_add` 入口就已是代码地址 → 覆盖发生在上游（`shdr` 垃圾 或 `sec` 野指针）；
 - 若入口正常、`section_realloc` 入口才变 → 覆盖发生在两者之间。
+
+### 第 37 次：把"字段被覆盖"也排除掉——证据收束到「#PF 重试时 rcx 被写成 RIP」
+
+**新的决定性对照**：在 `section_realloc` 里打印 `tcc_realloc` **前后重读**的 `sec` 字段
+（`[RE-in]` / `[RE-out]`），仍用零分配 + 无缓冲的 `sr_dbg`：
+
+```text
+[RE-in]  sec=0x100250010 alloc=0 doff=0 new_size=0x28f850 caller=tcc_load_object_file sec->data=0x0
+[RE-out] sec=0x100250010 alloc=0 doff=0 data=0x1005c8010 size=0x400000 new_size=0x28f850
+[fatal]  fault_addr=0x100a2009c rip=0x45808c ret=0x42e05e err=0x6
+```
+
+- **`sec->data_allocated` 在 memset 之前那一刻就是 0**（`[RE-out]` 是 memset 前的最后一行），
+  `sec->data` 也是 0；`tcc_realloc` 前后**没有变化** ⇒ "活对象被分配器覆盖"被排除；
+- `data=0x1005c8010`、`size=0x400000` ⇒ memset 标称范围 `[0x1005c8010, 0x1009c8010)`
+  **完全落在堆区之内**；
+- 而 `fault_addr - data = 0x45808C = rip`（该二进制里 memset 那条字节存储指令**自身**的地址）。
+  第 5/6/7/8/9 次运行**五次**都是这个关系。
+
+**收束结论**：memset 的实参正确、范围合法，却在"目标地址 = data + rip"处写失败 ⇒
+**在存储指令处 `rcx` 等于该指令自身的地址**。而 `xorl %ecx,%ecx` 就在存储指令前三条，
+且循环上界 `n=0x400000` 远小于 `rip=0x45808C`（循环**不可能**走到 `rcx=rip`）⇒
+**唯一自洽的解释：该存储指令是被"重试"进入的，重试时 `rcx` 被写成了返回 RIP。**
+
+**已排除的内核侧嫌疑**（读码核实，不是推断）：
+- IDT 公共 stub（`interrupt_common_stub`）压/弹 15 个 GPR 的顺序与
+  `resume_interrupt_frame` 读取的偏移**完全一致**（rcx@96、r11@32、rip@136），末尾走 `iretq`；
+- `interrupt_dispatch` 对 `vector==14 && cs&3==3` 的处理是"回调返回 true 即 `return`"，
+  全程不碰任何 GPR；
+- libsys 的 `syscall` 快速路径已声明 `lateout("rcx") _` / `lateout("r11") _`。
+
+**下一步（最小、决定性）**：写一个**独立用户态探针**——在一个用 `rcx` 计数的循环里跨越一次
+**按需分页 #PF**（如对刚 `malloc` 的大缓冲逐字节写，并在循环里核对计数是否被改写成代码地址）。
+复现 ⇒ 根因确证在内核的**用户态 #PF 重试返回路径**；不复现 ⇒ 问题只在这条 tcc 调用链上，
+回到 tcc 侧二分。
