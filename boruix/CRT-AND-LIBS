@@ -1445,3 +1445,24 @@ memset 换寄存器（后者只是绕过）。
 
 `boruix/probe_pf_rcx.c`（v7 形态）：`malloc(4MiB)` + 一个计数器在 `rcx` 的 asm 循环写满整块，
 打印 `rcx` 的最终值。**期望 `0x400000`，实测 `0x40006e`** ⇒ 一行输出即可判定修复与否。
+
+### 第 43 次：对内核侧的两条"最可能路径"做了读码排除（负结果也是进展）
+
+在动手改内核之前，先把两条最容易出问题的路径读透：
+
+1. **有没有内核代码直接写 `frame.rcx`？** 在 `kernel/crates/task/src` 与 `kernel/crates/kernel/src`
+   全量搜索 `rcx`：只有测试夹具里的 `rcx: 0` 初始化（`scheduler.rs:456`、`tests.rs` 若干），
+   **没有任何生产代码给 `frame.rcx` 赋值**。
+   ⇒ 帧里的 `rcx` 槽只可能来自 stub 的 `push rcx`。
+2. **有没有"半帧"混用？** `scheduler.rs` 里所有保存/恢复都是**整帧**：
+   `slot.saved = *frame`（保存）与 `*frame = slot.saved`（恢复），另有若干处只改
+   `slot.saved.rax`（唤醒返回值）——**没有只改 `rcx` 或只拷部分字段的路径**。
+   ⇒ 不存在"GPR 区来自旧帧、iretq 区来自新帧"的混搭。
+
+**两条都排除了。** 结合已知事实（`syscall` 硬件把返回 RIP 写进 `rcx`；syscall stub 把它压进
+帧的**通用寄存器** `rcx` 槽；`resume_interrupt_frame` 从 `[rdi+96]` 装载 `rcx`），
+**泄漏点必然是"某条会把用户 `rcx` 取自 syscall 帧"的路径**，而不是直接的赋值或半帧拷贝。
+
+**下一步（已收窄到可直接埋点）**：在 #PF 入口与返回处各留一行 `frame.rcx`（同一
+`sr_dbg` 风格的零分配 `write`，仅在内核侧临时开启），跑 v7 探针，看 `rcx` 是**在哪一次
+进入/返回**变成代码地址的——那一次进入的中断来源（#PF 还是 IRQ0）就是答案。
