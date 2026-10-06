@@ -1297,3 +1297,60 @@ tcc 的 `load_data()` 因此拿到 `-1/EFAULT`，又**丢弃返回值**，缓冲
 **按需分页 #PF**（如对刚 `malloc` 的大缓冲逐字节写，并在循环里核对计数是否被改写成代码地址）。
 复现 ⇒ 根因确证在内核的**用户态 #PF 重试返回路径**；不复现 ⇒ 问题只在这条 tcc 调用链上，
 回到 tcc 侧二分。
+
+## 🎯 第 38–40 次：**独立探针复现了同一崩溃**——这是系统侧缺陷，不是 tcc 的问题
+
+新增 `boruix/probe_pf_rcx.c`（30 行），把根因五缩到最小可复现形态。三次迭代：
+
+### v1：单个按需补页 #PF 是否破坏 `rcx`？
+
+把哨兵 `0xDEADBEEFCAFEBABE` 写进 `rcx` → 对一块**刚 `malloc` 的大缓冲**里某个**未触碰页**执行一条存储
+（必然触发按需补页 #PF）→ 读回 `rcx`。整段在**一个** asm 块里。
+
+```text
+[PFRCX] buf=0x100000010 target=0x100200010 before=deadbeefcafebabe after=deadbeefcafebabe RCX-OK
+```
+
+⇒ **内核在用户态 #PF 的"补页 → 重试"路径上**确实**保留了 `rcx`**（与第 37 次"重试把 rcx 写成 RIP"
+的猜测相反）。假设被证伪，必须换路。
+
+### v2：连续 16 次 #PF + 真正的大 `memset`
+
+```text
+[PF2] sentinel across 16 fresh pages: RCX-OK
+[PF2] memset 4194304 bytes at 0x100000010 ...
+[fatal] user exception -> terminate: sig=11 vector=14
+        fault_addr=0x10040cc2c rip=0x40cc1c ret=0x4002b5 err=0x6
+```
+
+- 哨兵跨 **16 次**连续 #PF 依然 OK；
+- 但 `memset(0x100000010, 0x5a, 4MiB)` **崩了**，且签名与 tcc 完全同形：
+  `fault_addr - buf = 0x40CC1C = rip`（**该探针二进制里** memset 那条字节存储指令的地址）。
+
+### v3：对照实验——`memset` 之前**没有任何调用**也会崩
+
+```text
+[fatal] ... fault_addr=0x10040ca3c rip=0x40ca2c ret=0x400064 err=0x6
+```
+
+第一次 `malloc -> memset`（中间无 printf、无任何调用）就崩，**连 `[PF3]` 的第一行都没打出来**；
+`fault_addr - 0x100000010 = 0x40CA2C = rip`，同一关系。反汇编显示 `main` 把缓冲指针放在 **`%rbx`**
+（callee-saved），随后 `movq %rbx, %rdi; call memset`。
+
+### 结论与剩余候选
+
+**这是系统侧缺陷，与 tcc 无关**：`malloc(4MiB)` 之后紧跟 `memset` 必崩，崩溃地址恒等于
+`buf + <memset 存储指令地址>`。已排除：
+
+- **不是** #PF 重试破坏 `rcx`（v1/v2 哨兵跨 1 次与 16 次 #PF 均 OK）；
+- **不是** `printf` 破坏 callee-saved 寄存器（v3 无 printf 也崩）；
+- **不是** `sec->data_allocated` 之类的 tcc 结构被覆盖（第 37 次 `[RE-out]` 已证）。
+
+**剩余候选（下一步按成本排序）**：
+1. **`malloc` 不保留 `%rbx`**（或它返回后寄存器里留了垃圾）——v3 的 `rdi` 恰为
+   `buf + rip`，与"寄存器被写成 `buf` 与某个代码地址之和"一致；用 asm 在 `malloc` 前后
+   直接读写 `%rbx`/`%r12`..`%r15` 即可判定；
+2. **libsys `memset` 的循环计数器在多次 #PF 之后被破坏**（v1 只跨 1 次、v2 哨兵每次跨 1 次，
+   都测不到"同一循环里连续多次 #PF"）——把哨兵测试改成"**在同一个 asm 块里连续写多个新页**"
+   即可判定；
+3. 兜底：把 `memset` 的循环换成 C 手写 `volatile` 逐字节循环（不经 `rcx`），看是否仍崩。
