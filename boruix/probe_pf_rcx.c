@@ -1,50 +1,55 @@
-/* probe_pf_rcx.c v7 —— 3P6-1 根因五：把"跨页次数"提到 memset 的量级（约 1024 次）。
+/* probe_pf_rcx.c v8 —— 3P6-1 根因五：判别被污染的是 rcx 还是"编译器分配的上界寄存器"。
  *
- * 已确证的事实：
- *   v4：C volatile 循环（计数器不在 rcx）跨约 1024 次 #PF -> **正常**；
- *   v5/v6：asm 循环（计数器在 rcx）跨 1 次 / 17 次 #PF -> **rcx 正确恢复**；
- *   v2：libsys memset（计数器在 rcx）跨约 1024 次 #PF -> **崩**（fault = buf + rip）。
+ * v7 读数 rcx=0x40006e（期望 0x400000）。算术上"逐 1 递增不可能跳过"，故唯一自洽解释是
+ * **上界寄存器被改成了 0x40006e**，rcx 是正常递增出来的（见 CRT-AND-LIBS 第 45 次更正）。
  *
- * v7 用**同一个 asm 循环**把跨度提到约 1024 页（从偏移 0x10 起写 4MiB-0x10），
- * 计数器仍在 rcx。这样把"寄存器"与"跨页次数"两个变量彻底分开：
- *   - 若崩 -> 触发条件是"**rcx 计数 + 上千次 #PF**"（寄存器+规模），与 memset 实现无关；
- *   - 若正常 -> 触发条件只剩 memset 这个函数本身（调用约定/代码形状）。
+ * v8 把上界做成**循环内部自带的倒计数**（\`mov cnt,rdx; decq rdx; jnz\`），只在进入时读一次
+ * 编译器给的 cnt，循环内不再引用任何编译器分配的寄存器作为边界：
+ *   - 若 rcx 正确走到 0x400000 且 rdx=0  => 上一版坏的是编译器分配的 end 寄存器；
+ *   - 若 rcx 仍不对                     => 坏的是 rcx 本身。
+ * 两种结果都指向"内核把帧 rcx 槽里的代码地址恢复进了用户 GPR"。
  */
 #include <stdio.h>
 #include <stdlib.h>
 
-static unsigned long write_span(unsigned char *base, unsigned long off, unsigned long count)
+static void write_span2(unsigned char *base, unsigned long off, unsigned long count,
+                        unsigned long *rcx_out, unsigned long *rdx_out)
 {
-    unsigned long out = 0;
+    unsigned long r = 0, d = 0;
     __asm__ __volatile__(
         "mov %[b], %%rdi\n\t"
         "mov %[o], %%rcx\n\t"
+        "mov %[c], %%rdx\n\t"
         "mov $0x5a, %%sil\n\t"
         "1:\n\t"
         "movb %%sil, (%%rdi,%%rcx)\n\t"
         "incq %%rcx\n\t"
-        "cmpq %[end], %%rcx\n\t"
-        "jb 1b\n\t"
-        "mov %%rcx, %[out]\n\t"
-        : [out] "=r"(out)
-        : [b] "r"(base), [o] "r"(off), [end] "r"(off + count)
-        : "rdi", "rcx", "rsi", "memory");
-    return out;
+        "decq %%rdx\n\t"
+        "jnz 1b\n\t"
+        "mov %%rcx, %[rout]\n\t"
+        "mov %%rdx, %[dout]\n\t"
+        : [rout] "=r"(r), [dout] "=r"(d)
+        : [b] "r"(base), [o] "r"(off), [c] "r"(count)
+        : "rdi", "rcx", "rdx", "rsi", "memory");
+    *rcx_out = r;
+    *rdx_out = d;
 }
 
 int main(void) {
     const unsigned long n = 4ul * 1024 * 1024;
     unsigned char *b = (unsigned char *)malloc(n);
     if (!b) {
-        printf("[PF7] malloc failed\n");
+        printf("[PF8] malloc failed\n");
         return 1;
     }
-    printf("[PF7] buf=%p\n", (void *)b);
+    printf("[PF8] buf=%p\n", (void *)b);
 
-    unsigned long e1 = write_span(b, 0x10, n - 0x10);   /* 约 1024 个页边界 */
-    printf("[PF7] span1024 rcx=%lx expect=%lx %s\n", e1, n,
-           (e1 == n) ? "RCX-RESTORED" : "RCX-CLOBBERED");
+    unsigned long rcx = 0, rdx = 1;
+    write_span2(b, 0x10, n - 0x10, &rcx, &rdx);
+    printf("[PF8] rcx=%lx expect=%lx  rdx=%lx expect=0  %s\n",
+           rcx, n, rdx,
+           (rcx == n && rdx == 0) ? "BOTH-OK" : "MISMATCH");
 
-    printf("[PF7] all done\n");
+    printf("[PF8] all done\n");
     return 0;
 }
