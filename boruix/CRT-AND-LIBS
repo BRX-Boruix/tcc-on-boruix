@@ -973,6 +973,49 @@ stdout 有缓冲，崩溃时缓冲会丢，最后一行证据就没了）。**�
 现在只知道**出错指令**（`memset`/`memcpy` 本身），不知道**是谁调用的**——而调用方才是缺陷所在。
 `InterruptFrame` 里有 `rsp`，这一条改动很小，但正是缺的那块拼图。
 
+## 根因链推进（2026-10-06 第 26-27 次）
+
+### 内核留证补上「调用方返回地址」
+
+`log_user_fatal` 现在多打一个 `ret=`：出错时读 `[rsp]`（`memset`/`memcpy`/`strncmp` 都是叶子函数，
+`[rsp]` 就是返回地址）。**读之前先经 `validate_user_range` 校验用户栈页**——
+`copy_from_user` 是裸拷贝，arch 层对内核态 #PF 一律停机，在致命路径上读野指针就是整机死机
+（`validate_user_range` 的文档正是这么写的）。
+
+**这一条立刻定位了第一个根因**：
+```text
+  [fatal] ... fault_addr=0x0 rip=0x454db7 ret=0x4341dd err=0x4
+  符号化: 0x454db7 -> strncmp ; 0x4341dd -> tcc_load_object_file
+```
+
+### 根因一：`malloc(0)` 返回 NULL（已修）
+
+`tcc_load_object_file` 里：
+```c
+  sh = &shdr[ehdr.e_shstrndx];
+  strsec = load_data(fd, file_offset + sh->sh_offset, sh->sh_size);   /* -> tcc_malloc(size) */
+```
+某对象的节名字符串表 `sh_size == 0` 时，`load_data` 走 `tcc_malloc(0)`；
+而我们的 `malloc(0)` **返回 NULL** -> `strsec = NULL` -> 随后 `strncmp(strsec + sh_name, ...)`
+**读空指针**崩溃。
+
+C 标准允许 `malloc(0)` 返回 NULL，但 **glibc 返回可用的非空指针**，大量既有程序依赖后者。
+3P6-1 的目标就是兼容既有程序，故**与 glibc 对齐**：`malloc(0)`/`calloc(0,n)` 按最小块分配、返回非空。
+（修复后崩溃点**前移**，说明这确实是一个真实缺陷。）
+
+### 根因二（当前卡点）：libc 的 `sprintf` 路径写只读代码段
+
+修复一之后的新崩溃：
+```text
+  [fatal] ... fault_addr=0x452034 rip=0x44cfb8 ret=0x4a8060 err=0x7
+  符号化: 0x44cfb8 -> <libc::stdio::MemSink as FmtSink>::write
+          0x452034 -> libc::stdio_format::emit_str
+  段表:   0x452034 落在第一个 LOAD 段（flags R E = 只读+可执行，即 tcc 的代码段）
+```
+
+`fault_addr` **恰好等于 `emit_str` 自身的地址** -> `MemSink.buf` 指向了代码 ->
+**这是完全发生在 libc 内部的缺陷**（`sprintf`/`snprintf` 路径），不涉及 tcc 的代码。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；
