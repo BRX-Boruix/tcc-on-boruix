@@ -9,37 +9,59 @@ tcc 链接一个程序时要找三类东西：CRT（`crt1.o`/`crti.o`/`crtn.o`�
 | --- | --- | --- |
 | `crt1.o` | 我们的入口桥接（提供 `user_main`、引用 `main`）：`user_main.o` 或 `user_main_argv.o` | 已备（拷贝为 `crt1.o`） |
 | `crti.o` / `crtn.o` | **空对象**：常规 POSIX 里它们放 `.init`/`.fini` 前后缀，本系统没有该机制 | 已备（空 `.o`） |
-| `libtcc1.a` | 编译器支持例程（64 位除法、软浮点等） | **未备**——见下 |
-| `libc` | `<sysroot>/lib/libc.a`（含 libsys，入口 `_start` 就在里面） | 已备（拷贝到 tcc 目录） |
+| `libtcc1.a` | 编译器支持例程（64 位除法、软浮点等） | **未备** |
+| `libc` | `<sysroot>/lib/libc.a`（含 libsys，入口 `_start` 就在里面） | 已备 |
 
-## 当前卡点（2026-10-06，如实记录）
+资产由 `boruix/stage_assets.py` 一条命令铺到数据盘（`tools/diskfiles/3p/tcc/`）。
 
-在 BORUIX 内执行 `tcc /volumes/BORUIX_DATA/3p/hello.c -o .../hello`：
+## 卡点已定位（2026-10-06）：**libc 没有真正的 `lseek`**
 
-1. **先报** `crt1.o` / `crti.o` **not found** —— 因为 `CONFIG_TCC_CRTPREFIX` 默认 `/usr/lib`，本系统没有该目录。
-2. 把 crt 对象与 `libc.a` 放进 tcc 目录、并设好 `CONFIG_TCC_CRTPREFIX` 之后，**改为报**：
-   ```text
-   /volumes/BORUIX_DATA/3p/tcc/crt1.o: error: invalid object file
-   /volumes/BORUIX_DATA/3p/tcc/crti.o: error: invalid object file
-   ```
+### 症状
 
-   tcc 的判定逻辑（`tccelf.c`）只有两种情况会给这条消息：
-   - 不是 `ET_REL` / 不是小端 / `e_machine` 不匹配；
-   - 或者**读到的字节数不足一个 ELF 头（64 字节）**。
+BORUIX 内 `tcc hello.c -o .../hello`：**编译通过**（头文件生效、无编译错误），链接时报
+`crt1.o: error: invalid object file` / `crti.o: error: invalid object file`。
 
-   宿主机上这两个对象经 `llvm-readelf` 确认是**合法 ELF64 REL**，故第一条不成立。
-   因此嫌疑落在**第二条**：盘上那份文件内容不完整。
+### 排除掉的两个猜测（都是实测排除，不是推理）
 
-   **但尚未证实**：我试图直接在宿主机的 `disk.img` 里搜指纹来判定，
-   **该测量无效**（75 MB 的镜像经 `FileStream` 读回 0 字节；工具层对二进制大文件的读取不可靠）。
-   **所以目前不知道盘上内容是否完整——不要据此下结论。**
+1. **不是「文件没进盘」**：写了探针 `boruix/probe_file.c` 在 **BORUIX 内部**读文件并打印头 16 字节——
+   `crt1.o` 读到的是 `7f 45 4c 46 02 01 01 00 ...`（正是 ELF 魔数），`libc.a` 读到 `!<arch>`。
+   （顺带纠正：我此前试图在宿主机上直接搜 `disk.img` 的字节来判定，那条测量**无效**——
+   75 MB 镜像经 `FileStream` 读回 0 字节。**教训：二进制大文件的判读交给系统内部做。**）
+2. **不是文件格式问题**：宿主机 `llvm-readelf` 确认两个对象是合法 `ELF64 REL`、小端、`EM_X86_64`。
 
-## 下一步（下一轮）
+### 真因
 
-从 **BORUIX 内部**判定，而不是靠宿主机读镜像：写一个几行的探针程序，读
-`/volumes/BORUIX_DATA/3p/tcc/crt1.o` 并打印**读到的字节数与头 16 字节**。
-这能一次性区分「盘上内容不完整」与「tcc 读取器不接受 clang 产物」。
+`libc/src/unistd.rs` 的 `lseek` 是**空操作**：`SEEK_SET` 只把 `offset` 原样返回，**不通知内核**；
+`SEEK_END`/`SEEK_CUR` 一律 `ENOTSUP`（注释写明「内核不暴露当前位置」）。
 
-之后无论哪一支，都要继续处理 `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）与
-**链接布局**（本内核要求 `PT_LOAD` 页对齐、无 RELRO 拆页；tcc 的内部链接器未必默认满足，
-可能需要 `-Ttext` 之类的约束，或改用它调外部链接器）。
+而 tcc 的读文件流程是典型 POSIX 套路：
+```text
+  tcc_object_type(fd)      // 先读 64 字节判断是不是 ELF
+  lseek(fd, 0, SEEK_SET)   // 复位   ← 在 BORUIX 上是空操作
+  read(fd, buf, size)      // 按「从头开始」读节表  ← 实际从偏移 64 开始，全部错位
+```
+复位失效 → 后续所有读都错位 → tcc 判对象文件非法。**文件是好的，坏的是 `lseek`。**
+
+### 内核侧的事实（已查证）
+
+- 内核**没有** seek 系统调用；`SYS_STREAM_READ`/`WRITE` 每次**自带偏移**：
+  `STREAM_OFFSET_CURRENT`（`u64::MAX`）= 顺序，**其他任何值 = 定位 I/O（pread/pwrite），且不推进句柄位置**
+  （`syscall.rs` 的 ABI 注释 + `IllegalSeek` 检查）；
+- 可定位性是**节点属性**（`inode.is_seekable()`，KM17）；
+- 所以「POSIX 的文件位置」在本系统里**必须由用户态维护**——这是 libc 的职责，不是内核缺陷。
+
+### 修法（下一轮落地）
+
+在 **libc** 里实现真正的 `lseek`：
+1. `libsys` 补 `pread`/`pwrite`（带显式偏移的薄封装；内核已支持，只是没暴露）；
+2. libc 维护**每 fd 的位置表**；`read`/`write` 改为定位 I/O + 推进位置；
+3. `lseek` 读写该表并返回新位置（`SEEK_SET`/`CUR`/`END` 三态齐备）；
+4. 注意 `dup`/`close` 的位置语义，并跑全量回归（`read`/`write` 是所有程序的地基）。
+
+### 还欠
+
+- `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；
+- **链接布局**：本内核要求 `PT_LOAD` 页对齐、无 RELRO 拆页，tcc 的内部链接器未必默认满足；
+- 顺带记一笔（**后续会咬人**）：clang 默认给对象加 `.llvm_addrsig` 节（非标准节类型
+  `LLVM_ADDRSIG`），tcc 的 ELF 读取器未必认。`libc.a` 里的对象同样带它，故修好 `lseek` 之后
+  若报节相关错误，优先查这里（`-fno-addrsig` 可抑制）。

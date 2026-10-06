@@ -22,7 +22,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.dirname(HERE)                 # tcc 上游源码树根
-ROOT = os.path.dirname(os.path.dirname(SRC))  # 工作区根
+ROOT = os.path.dirname(SRC)                   # 工作区根（SRC 是 tcc-on-boruix/）
 DEFAULT_DEST = os.path.join(ROOT, "tools", "diskfiles", "3p", "tcc")
 
 
@@ -61,7 +61,7 @@ def main():
     if not cc:
         sys.exit("找不到 clang（可用 BORUIX_CLANG 指定）")
     empty = os.path.join(dest, "_empty.c")
-    with open(empty, "w", encoding="ascii", newline="\n") as f:
+    with open(empty, "w", encoding="utf-8", newline="\n") as f:
         f.write("/* empty: BORUIX 无 .init/.fini 前后缀机制 */\n")
     for name in ("crti.o", "crtn.o"):
         r = subprocess.run([cc, "--target=x86_64-unknown-none", "-ffreestanding",
