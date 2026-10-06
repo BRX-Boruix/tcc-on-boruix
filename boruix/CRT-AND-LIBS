@@ -1653,3 +1653,99 @@ v9 的 asm 用 `%r8` 存一个**独立硬上界**（`off+count`），循环条�
 **下一步（唯一入口）**：把同样的 dump 挂到 **IRQ0 入口/返回**（`tick` 被调用前后），跑 v9
 逐次对比——找出**哪一次 IRQ0** 返回后 `rdx` 已经不对。重点查 `tick` 里
 `slot.saved = *frame` 与 `*frame = slot.saved` 这一对是否可能被**跨核/跨桶**的保存覆盖。
+
+## 🎯 第 49–51 次：根因五**已定位并修复**——`sysretq` 回程把用户 `rcx`/`r11` 换成 RIP/RFLAGS
+
+### 第 49 次（更正）：循环**确实**在跨页 #PF，且最后一条 PFD 紧邻退出
+
+把内核 dump 挂到用户 #PF 分支入口（零分配 `raw_serial_fmt`），跑 v9：
+
+```text
+[PFD] rip=0x400082 rcx=0x3ff0  rdx=0x3fc010 rsp=0x7ffeffffde70 cr2=0x100004000
+...
+[PFD] rip=0x400082 rcx=0x6bff0 rdx=0x394010 rsp=0x7ffeffffde70 cr2=0x10006c000
+[PF9] rdi=100000010 (buf=100000010) rcx=400083 (expect 400000) rdx=394010 (expect 0) MISMATCH
+```
+
+**更正（S09）**：第 48 次写的「循环体 rip=0x400082 一次 #PF 都没有」是**误读**——那次只看了
+71 条 `[PFD]` 的**首尾**，中间被省略号截断的正是**循环体的 27 条**。实际：
+
+- 循环每跨 **16 KiB** 触发一次 #PF（`handle_page_fault` 的 4 页预取），`cr2` 一路从
+  `0x100004000` 到 `0x10006c000`；**最后一条 PFD 之后循环立刻退出**；
+- 退出值 `rcx=0x400083` 恰好 = 该次 #PF 的出错 RIP（`0x400082`，即循环体存储指令）+ 1。
+  ⇒ 循环不是跑完退出的，是 **`rcx` 被写成了「被打断处的 RIP」**。
+
+### 第 50 次：A/B 判别——#PF 只是「让循环足够长」，元凶是时钟抢占后的**返回路径**
+
+v11 探针做同进程内 A/B 对照（同一段 asm 循环跑两次）：
+
+```text
+[PF11] A(fresh,#PF)  exit: rcx=400086(expect 400000) rdx=328010(expect 0) ... MISMATCH
+[PF11] B(pretouched) exit: rcx=400000(expect 400000) rdx=0(expect 0) ... OK
+```
+
+A = `malloc(4MiB)` 后立即跑（循环期间每 16 KiB 一次 #PF，**耗时长**）；
+B = 先逐页预触碰再跑（循环期间无 #PF，**很快**）。
+
+⇒ **#PF 本身不写坏任何东西**（PFA/PFB 逐次对照证明 `handle_page_fault` 回调前后帧完全不变），
+它只是把循环拉长到**足以被时钟（IRQ0）抢占**。真正的窗口是「被抢占 → 之后由**另一条返回
+路径**切回」。
+
+### 第 51 次：全量 GPR 快照给出**判决性指纹**——`rcx` = 被打断的 RIP，`r11` = RFLAGS
+
+v12 把循环出口的 **15 个 GPR 全部直接写进内存**（`"=m"` 操作数，不经任何搬运寄存器），
+A/B 各一次：
+
+```text
+A: r11=10203  rcx=40008c rdx=2b4010 rbx=1 rax=21 cs=2b ss=33   <- 坏
+B: r11=3ffff0 rcx=400000 rdx=0      rbx=0 rax=27 cs=2b ss=33   <- 好
+```
+
+- 编译器在 A/B 两处**都**执行了 `movl $0x3ffff0,%r11d`（反汇编核对），而 A 里 `r11=0x10203`
+  ⇒ `r11` 被外部改写；
+- A 的循环体存储指令在 `0x40008b`，而 `rcx=0x40008c`（= 该指令地址 + 1：切回后又跑了一次
+  `incq`）⇒ `rcx` 被写成了**该指令的地址**；
+- `0x10203 = CF|1|IF|RF`，正是 **#PF 帧里 RFLAGS 的值**（RF 位由 CPU 在交付故障时置位）。
+
+**`rcx ← RIP` 且 `r11 ← RFLAGS`，且两者都不从栈恢复——这是 `sysretq` 的语义，别无他物。**
+
+### 根因（内核缺陷，与 tcc 无关）
+
+`arch-x86_64/src/interrupts.rs` 的 `syscall_entry_stub` 阶段 7/8 用 `sysretq` 回用户态：
+`pop rcx`（取帧的 **RIP 槽**）、`pop r11`（取帧的 **RFLAGS 槽**）、`sysretq`。
+
+而**这个 stub 的返回路径会被调度器用来进入任意进程**：某进程在本 stub 里阻塞时，syscall
+内部的 `commit_next` 会 `*frame = slot.saved` 把**目标进程的帧**整体写进本 stub 的帧位置，
+随后由本 stub 的尾部负责进入它。目标进程的帧可能是**中断路径**（`interrupt_common_stub`
+的时钟 / #PF）保存的——那种帧的 `rcx` 槽与 `r11` 槽装的是**用户当时真正的 rcx/r11**，不是
+syscall 约定值。
+
+于是：**被时钟抢占的进程，只要下一次是被「别人的阻塞 syscall」切回来的，它的 `rcx` 就变成
+被打断处的 RIP、`r11` 变成 RFLAGS。** 对「把循环计数器放在 `rcx`」的代码（libsys 的
+`memset`、tcc 的 `load_data`/`section_realloc`）这是致命的：计数器被换成代码地址
+（≈0x40xxxx，远大于 `n`），`cmpq %rcx,%rdx; je` 永不满足 ⇒ 循环冲出缓冲区 ⇒ `err=0x6` ⇒
+SIGSEGV。这**一次**解释了根因五的全部形态：`fault_addr = buf + rip`、「被污染的是某个
+GPR」、以及为什么只在长循环里出现（短循环来不及被抢占）。
+
+### 修法（kernel `crates/arch/arch-x86_64/src/interrupts.rs`）
+
+`syscall_entry_stub` 阶段 7/8 改为 **`iretq`**：弹 15 个 GPR 后 `add rsp,16`，按**即将 iretq
+的那一帧的 CS** 门控 `swapgs`，再 `iretq`——与 `interrupt_common_stub` 的尾部逐指令等价。
+
+- **不变式（修复后必须维持）**：两个 stub 的返回路径必须能**互换地消费对方保存的帧**。
+- syscall ABI 不变：syscall 帧的 `rcx`/`r11` 槽本就是本 stub 压入的「返回 RIP / RFLAGS」，
+  用户拿到的值不变（实测返回值全部正常）。
+- 代价：`sysretq` 回程（SYSCALL-FAST-4）废除；入口仍是 `syscall`（LSTAR），免 `int 0x80`
+  门开销的主要收益保留。
+- 中途踩坑（如实记录）：首次改完忘了删掉原来的阶段 6 `add rsp,16`，导致**双份跳过**，
+  `iretq` 从 RFLAGS 槽开始弹 → 启动期 #GP（`error=0xd8f0`、rip 落在 stub 内）。删掉重复的
+  那一条后正常。
+
+### 验收证据
+
+- **探针 A/B 双 OK**（v12，同一构建）：`A ... rcx=400000 rdx=0 r11=3ffff0 OK`、`B ... OK`；
+  `cs` 由 sysretq 时代的 `0x3b` 变为 iretq 的 `0x2b`，佐证返回路径确已更换。
+- **tcc 侧**：`cd /volumes/BORUIX_DATA/3p && tcc hello.c -o hello && ./hello` 的失败点从
+  **SIGSEGV（根因五）** 变为 **`tcc: memory full`**——干净的错误退出，不再是寄存器被写坏。
+  ⇒ 根因五（内核帧返回路径）**已修复**；下一道坎是 tcc 编译 hello.c 的**内存需求**
+  （默认 256 MiB 下堆上限约 56 MiB，tcc 载入 libc.a 后触顶）。
