@@ -58,6 +58,30 @@ BORUIX 内 `tcc hello.c -o .../hello`：**编译通过**（头文件生效、无
 3. `lseek` 读写该表并返回新位置（`SEEK_SET`/`CUR`/`END` 三态齐备）；
 4. 注意 `dup`/`close` 的位置语义，并跑全量回归（`read`/`write` 是所有程序的地基）。
 
+## 进展（2026-10-06 第 2 次）：`lseek` 已实现，对象文件可读了
+
+在 libc 里实现了**真正的 `lseek`**（位置表 + 定位 I/O，见 `libc/src/unistd.rs`）：
+调用过 `lseek` 的 fd 转入「用户态维护位置」模式，此后 `read`/`write` 走 `pread`/`pwrite` 并推进位置；
+**没调用过的 fd 行为逐字不变**（顺序读，内核维护）——把影响面压到最小。
+
+**效果（实测）**：`crt1.o`/`crti.o` 的 `invalid object file` **消失**，tcc 一路走到解析 `hello.c`。
+
+**踩过的两个坑（都是流程错，不是代码错）**：
+
+1. **改了 libc 却没重链 `tcc.elf`**：它是静态二进制，libc 链在里面。只更新 tcc 目录里的 `libc.a`
+   （那是给 tcc **编译出来的程序**用的）不会让 tcc 自己用上新 libc——必须用 `build.py` 重链。
+2. **手工经多层转义拼源码**：`hello.c` 里的换行转义在某一层被解释成**真换行**，导致 C 字符串字面量
+   断行（tcc 报 `missing terminating` 引号字符）。已改为由 `stage_assets.py` 从**正本**
+   `tests/hello.c` 拷贝——**正本只有一份，拷贝没有转义问题**。
+
+### 当前状态：编译通过，**链接期 SIGSEGV**（退出码 11）
+
+`hello.c` 不再有语法错误，但 tcc 随后**段错误**退出（无错误消息）。下一步的隔离手段：
+**用 `tcc -c hello.c -o hello.o` 只编译不链接**——一次就能区分「编译期崩」与「链接期崩」。
+
+若崩在链接期，首要嫌疑是**节类型**：clang 默认给对象加 `.llvm_addrsig`（非标准节类型
+`LLVM_ADDRSIG`），而 `libc.a` 里的对象全都带它——tcc 读归档成员时可能不认（`-fno-addrsig` 可抑制）。
+
 ### 还欠
 
 - `libtcc1.a`（可由 clang 从上游 `lib/*.c` 编出）；

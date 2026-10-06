@@ -74,6 +74,14 @@ def main():
     # 4) libc.a
     shutil.copy(os.path.join(lib_src, "libc.a"), os.path.join(dest, "libc.a"))
     print("[stage] libc.a <- %s" % os.path.join(lib_src, "libc.a"))
+
+    # 5) 验收夹具 hello.c：从**正本**（tests/hello.c）拷到磁盘。
+    #    为什么要脚本拷而不是手工写：手工经多层引号/转义拼源码出过事——
+    #    `\n` 在某层被解释成真换行，导致 C 字符串字面量断行（tcc 报
+    #    `missing terminating " character`）。正本只有一份，拷贝没有转义问题。
+    disk_root = os.path.dirname(dest)          # diskfiles/3p
+    shutil.copy(os.path.join(SRC, "tests", "hello.c"), os.path.join(disk_root, "hello.c"))
+    print("[stage] hello.c <- tests/hello.c")
     return 0
 
 
