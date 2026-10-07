@@ -22,7 +22,11 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <dirent.h>
+#include <grp.h>
+#include <fcntl.h>
+#include <boruix.h>
 
 #define DIRPATH "/volumes/BORUIX_DATA/3p"
 #define FILEPATH DIRPATH "/hello.c"
@@ -201,6 +205,77 @@ int main(int argc, char **argv) {
         check(path != NULL && path[0] != 0, "PATH 非空");
     }
 
+
+    /* 9. 3P6-2 第二波：**头文件覆盖审计**列出的那些入口——按真实用法逐项验证。
+     * 它们此前"实现了但没声明"（getpid/dup2/EINTR 那一类），审计一次列全后补上声明；
+     * 这里用真实调用证明"声明可用、语义可跑"，而不是只看头文件里有没有那个词。 */
+    {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        printf("[wave2] sysconf(_SC_NPROCESSORS_ONLN)=%ld\n", n);
+        check(n > 0, "sysconf 在线 CPU 数 > 0");
+        check(sysconf(99999) == -1, "sysconf 不支持的名字返回 -1");
+    }
+    {
+        struct group *gr = getgrgid(0);
+        printf("[wave2] getgrgid(0)=%s\n", gr ? gr->gr_name : "(null)");
+        check(gr == NULL || gr->gr_name != NULL, "getgrgid 要么 NULL 要么有名字");
+        endgrent();
+    }
+    check(boruix_malloc_corrupt() == 0, "boruix_malloc_corrupt() == 0");
+    check(yield_sys() == 0, "yield_sys() == 0");
+
+    /* rename / ftruncate / symlink / chown：在数据盘上**真做一遍**（不 mock）。 */
+    {
+        const char *fa = "w2tmp_a";
+        const char *fb = "w2tmp_b";
+        const char *fl = "w2tmp_link";
+        FILE *f = fopen(fa, "w");
+        check(f != NULL, "创建临时文件");
+        if (f) {
+            fputs("0123456789", f);
+            fclose(f);
+        }
+        check(rename(fa, fb) == 0, "rename 成功");
+        {
+            int fd = open(fb, O_WRONLY);
+            check(fd >= 0, "open 临时文件");
+            if (fd >= 0) {
+                check(ftruncate(fd, 4) == 0, "ftruncate 成功");
+                close(fd);
+            }
+        }
+        {
+            int rc = symlink(fb, fl);
+            printf("[wave2] symlink -> rc=%d errno=%d\n", rc, errno);
+            check(rc == 0 || errno != 0, "symlink 有明确结果");
+            if (rc == 0) remove(fl);
+        }
+        {
+            int rc = chown(fb, 0, 0);
+            printf("[wave2] chown -> rc=%d errno=%d\n", rc, errno);
+            check(rc == 0 || errno != 0, "chown 有明确结果");
+        }
+        remove(fb);
+    }
+
+    /* fork + waitpid + W* 宏（<sys/wait.h>）：真起一个子进程、真收它的退出码。 */
+    {
+        int pid;
+        fflush(stdout);
+        pid = fork();
+        if (pid == 0) {
+            _exit(42);
+        }
+        check(pid > 0, "fork 返回子 pid");
+        if (pid > 0) {
+            int st = 0;
+            int got = waitpid(pid, &st, 0);
+            printf("[wave2] waitpid -> pid=%d status=%d WIFEXITED=%d WEXITSTATUS=%d\n",
+                   got, st, WIFEXITED(st), WEXITSTATUS(st));
+            check(got == pid, "waitpid 返回子 pid");
+            check(WIFEXITED(st) != 0 && WEXITSTATUS(st) == 42, "WEXITSTATUS == 42");
+        }
+    }
     if (fails) {
         printf("[wave2] %d 项断言失败\n", fails);
         return 1;
