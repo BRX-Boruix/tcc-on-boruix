@@ -259,6 +259,42 @@ int main(int argc, char **argv) {
         remove(fb);
     }
 
+
+    /* 判别实验（目标第 8 轮）：用 WNOHANG 轮询区分两种假设——
+     *   A) 子进程卡在 _exit（轮询永远拿不到状态，阻塞等也拿不到）
+     *   B) 父进程的 waitpid 丢了唤醒（轮询能拿到已退出子进程的状态） */
+    {
+        int dpid;
+        int dst = 0;
+        int di;
+        int drc = 0;
+        fflush(stdout);
+        dpid = fork();
+        if (dpid == 0) {
+            printf("[disc] child exiting 42\n");
+            fflush(stdout);
+            _exit(42);
+        }
+        printf("[disc] fork returned %d\n", dpid);
+        fflush(stdout);
+        for (di = 0; di < 30; di++) {
+            yield_sys();
+            drc = waitpid(dpid, &dst, WNOHANG);
+            printf("[disc] poll %d -> %d (errno=%d)\n", di, drc, errno);
+            fflush(stdout);
+            if (drc != 0) {
+                break;
+            }
+        }
+        if (drc == 0) {
+            printf("[disc] 30 次轮询都没拿到 -> 转阻塞等\n");
+            fflush(stdout);
+            drc = waitpid(dpid, &dst, 0);
+            printf("[disc] blocking -> %d status=%d code=%d\n", drc, dst, WEXITSTATUS(dst));
+            fflush(stdout);
+        }
+        check(drc == dpid && WEXITSTATUS(dst) == 42, "判别：拿到子进程退出码 42");
+    }
 #if 0 /* 隔离实验（第 63 轮）：暂时关掉 fork 段，先拿到第 10/11/12 组的运行证据，
        * 并把「挂起是否只发生在 fork 段」这一判定做出来。见 docs/TODO/3p.md 的下一步。 */
     /* fork + waitpid + W* 宏（<sys/wait.h>）：真起一个子进程、真收它的退出码。 */
