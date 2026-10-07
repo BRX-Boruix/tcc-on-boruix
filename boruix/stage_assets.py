@@ -37,6 +37,20 @@ def main():
     lib_src = os.path.join(a.sysroot, "lib")
     dest = a.dest
     inc = os.path.join(dest, "include")
+
+    # 0) **前置检查（先于任何写入）**：本脚本就地覆盖 `dest/` 里的资产，**中途失败会留下
+    #    「半更新」状态**——头文件已是新的、`libc.a` 还是旧的。那正是「改了 libc 却验了旧库」
+    #    这类幽灵故障的来源（2026-10 实测：缺 `BORUIX_CLANG` 时脚本在第 3 步 `sys.exit`，
+    #    而 `libc.a` 的复制在第 4 步 ⇒ 盘上的库仍是旧的，而调用方只看到一行 stderr）。
+    #    故**所有前置条件在这里一次查完**：缺任何一项就立刻退出，**一个字节都不写**。
+    cc = os.environ.get("BORUIX_CLANG") or shutil.which("clang")
+    if not cc:
+        sys.exit("前置检查失败：找不到 clang（可用 BORUIX_CLANG 指定）——未写入任何文件")
+    for rel in ("lib/libc.a", "lib/user_main_argv.o"):
+        p = os.path.join(a.sysroot, *rel.split("/"))
+        if not os.path.isfile(p):
+            sys.exit("前置检查失败：sysroot 缺少 " + p + "——未写入任何文件")
+
     os.makedirs(inc, exist_ok=True)
 
     # 1) 头文件：tcc 自带的（stdarg/stddef/stdbool/float/... 属编译器支持）先铺，
@@ -57,9 +71,7 @@ def main():
     print("[stage] crt1.o <- user_main_argv.o")
 
     # 3) crti.o / crtn.o = 空对象。用 sysroot 的 C 驱动同款目标编译，保证 ABI 一致。
-    cc = os.environ.get("BORUIX_CLANG") or shutil.which("clang")
-    if not cc:
-        sys.exit("找不到 clang（可用 BORUIX_CLANG 指定）")
+    #    `cc` 已在第 0 步查过（提前到那里正是为了「失败不留半更新」）。
     empty = os.path.join(dest, "_empty.c")
     with open(empty, "w", encoding="utf-8", newline="\n") as f:
         f.write("/* empty: BORUIX 无 .init/.fini 前后缀机制 */\n")
