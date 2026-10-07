@@ -276,6 +276,75 @@ int main(int argc, char **argv) {
             check(WIFEXITED(st) != 0 && WEXITSTATUS(st) == 42, "WEXITSTATUS == 42");
         }
     }
+
+    /* 10. 3P6-2「整项缺失」类：身份查询（getuid/geteuid/getgid/getegid）与 dup。
+     * 这些此前**既没实现也没声明**（反向对账清单列出来的），所以不能只验"能编译"——
+     * 要用**交叉证据**：新建文件的 st_uid/st_gid 必须等于 getuid()/getgid()。 */
+    {
+        uid_t u = getuid();
+        uid_t eu = geteuid();
+        gid_t g = getgid();
+        gid_t eg = getegid();
+        printf("[wave2] getuid=%d geteuid=%d getgid=%d getegid=%d\n",
+               (int)u, (int)eu, (int)g, (int)eg);
+        check(u == eu, "geteuid()==getuid()（本系统无 real/effective 之分）");
+        check(g == eg, "getegid()==getgid()");
+        {
+            FILE *f = fopen("w2id.tmp", "w");
+            check(f != NULL, "创建身份交叉验证文件");
+            if (f) {
+                fputs("x", f);
+                fclose(f);
+            }
+            {
+                struct stat st;
+                if (stat("w2id.tmp", &st) == 0) {
+                    printf("[wave2] stat.st_uid=%u st_gid=%u\n",
+                           (unsigned)st.st_uid, (unsigned)st.st_gid);
+                    check((uid_t)st.st_uid == u, "新建文件 st_uid == getuid()（交叉验证）");
+                    check((gid_t)st.st_gid == g, "新建文件 st_gid == getgid()（交叉验证）");
+                } else {
+                    check(0, "stat 身份交叉验证文件");
+                }
+            }
+            remove("w2id.tmp");
+        }
+    }
+    {
+        /* dup：真读一个文件，验证 (a) 得到不同的新 fd、(b) 与原 fd **共享文件偏移** */
+        int fd = open(FILEPATH, O_RDONLY);
+        check(fd >= 0, "open 供 dup 测试");
+        if (fd >= 0) {
+            char a[8];
+            char b[8];
+            ssize_t n1 = read(fd, a, 4);
+            int d;
+            a[n1 > 0 ? n1 : 0] = 0;
+            d = dup(fd);
+            check(d >= 0, "dup 返回新 fd");
+            check(d != fd, "dup 的 fd 与原 fd 不同");
+            if (d >= 0) {
+                ssize_t n2 = read(d, b, 4);
+                b[n2 > 0 ? n2 : 0] = 0;
+                printf("[wave2] dup: 原读='%s' 副本续读='%s'\n", a, b);
+                check(n1 == 4 && n2 == 4, "两次各读到 4 字节");
+                /* hello.c 前 8 字节是 "#include"，故副本必须从第 5 字节 'l' 续读。 */
+                check(n2 == 4 && b[0] == 'l', "副本从原 fd 当前位置续读（共享偏移）");
+                close(d);
+            }
+            close(fd);
+        }
+    }
+    {
+        /* fcntl(F_DUPFD)：与 dup 共用同一实现的回归保护 */
+        int fd = open(FILEPATH, O_RDONLY);
+        if (fd >= 0) {
+            int d = fcntl(fd, F_DUPFD, 0);
+            check(d >= 0 && d != fd, "fcntl(F_DUPFD,0) 与 dup 同实现且可用");
+            if (d >= 0) close(d);
+            close(fd);
+        }
+    }
     if (fails) {
         printf("[wave2] %d 项断言失败\n", fails);
         return 1;
