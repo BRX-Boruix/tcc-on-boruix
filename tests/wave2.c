@@ -345,6 +345,65 @@ int main(int argc, char **argv) {
             close(fd);
         }
     }
+
+    /* 11. 3P6-2「整项缺失」类 A 批（低风险包装）：逐项用真实调用验证，不看"能编译"就算过。 */
+    {
+        FILE *f = fopen(FILEPATH, "r");
+        check(f != NULL, "fopen 供 fileno/rewind 测试");
+        if (f) {
+            int fd = fileno(f);
+            char b1[5];
+            char b2[5];
+            check(fd >= 0, "fileno 返回非负 fd");
+            check(read(fd, b1, 4) == 4, "用 fileno 的 fd 直接 read");
+            b1[4] = 0;
+            rewind(f);
+            check(read(fd, b2, 4) == 4, "rewind 后重新 read");
+            b2[4] = 0;
+            printf("[wave2] fileno/rewind: '%s' -> rewind -> '%s'\n", b1, b2);
+            check(strcmp(b1, b2) == 0, "rewind 真的回到了开头");
+            clearerr(f);
+            check(ferror(f) == 0, "clearerr 后 ferror==0");
+            fclose(f);
+        }
+    }
+    {
+        char *d = strndup("abcdef", 3);
+        check(d != NULL && strcmp(d, "abc") == 0, "strndup(abcdef,3)==abc");
+        if (d) free(d);
+        check(atof("3.5") == 3.5, "atof(3.5)==3.5");
+        check(difftime((time_t)100, (time_t)40) == 60.0, "difftime(100,40)==60");
+    }
+    {
+        FILE *f = fopen("w2trunc.tmp", "w");
+        check(f != NULL, "创建 truncate 测试文件");
+        if (f) {
+            fputs("0123456789", f);
+            fclose(f);
+        }
+        check(truncate("w2trunc.tmp", 4) == 0, "truncate 到 4 字节");
+        {
+            struct stat st;
+            if (stat("w2trunc.tmp", &st) == 0)
+                check(st.st_size == 4, "truncate 后 size==4");
+            else
+                check(0, "stat truncate 结果");
+        }
+        remove("w2trunc.tmp");
+        check(mkdir("w2dir.tmp", 0755) == 0, "mkdir 测试目录");
+        check(rmdir("w2dir.tmp") == 0, "rmdir 删空目录");
+        {
+            pid_t pp = getppid();
+            printf("[wave2] getppid=%d getpid=%d\n", (int)pp, (int)getpid());
+            check(pp >= 0 && pp != getpid(), "getppid 与自身 pid 不同");
+        }
+    }
+    {
+        /* perror：真触发一次失败，输出应形如 "wave2-perror: No such file or directory" */
+        FILE *f = fopen("/nope/nope", "r");
+        check(f == NULL, "fopen 失败（供 perror 测试）");
+        perror("wave2-perror");
+    }
     if (fails) {
         printf("[wave2] %d 项断言失败\n", fails);
         return 1;
