@@ -1,0 +1,210 @@
+/* wave2.c —— 3P6-2（libc 宽度第二波）的**真实驱动 + 自检**。
+ *
+ * 为什么是这个程序：第二波的判据是「按 tcc/GCC 的**真实报错**补，不预猜」，所以需要一个
+ * 真实会用到 libc 多面（而不只是 printf）的程序。这就是一个"系统内小工具"：
+ * 打印自己的 argv、读一个文件并统计词尾、列一个目录、格式化当前时间、报告 errno、
+ * 排序一小串字符串、读环境变量。
+ *
+ * 本轮由它**真实暴露**并已修的缺口（不是预猜的清单）：
+ *   1. strftime —— 头文件没声明、库里也没实现（tcc: unresolved reference to 'strftime'）；
+ *   2. getpid   —— 实现早就在（libc/src/process.rs），缺的只是 <unistd.h> 里的**声明**
+ *                  （tcc: implicit declaration of function 'getpid'）。
+ *
+ * 它同时是 3P6-4（系统内编出一个新 cowsay 并运行）的前身——先把"能编能跑能自检"的底座打通。
+ *
+ * 退出码 0 = 全部断言通过。
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <ctype.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <dirent.h>
+
+#define DIRPATH "/volumes/BORUIX_DATA/3p"
+#define FILEPATH DIRPATH "/hello.c"
+
+static int fails = 0;
+
+static void check(int cond, const char *what) {
+    if (!cond) {
+        printf("[wave2] FAIL: %s\n", what);
+        fails++;
+    }
+}
+
+static int cmp_str(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* 用**固定**的 struct tm 校验 strftime 的确定性输出（不依赖真实时钟）。 */
+static void check_strftime(void) {
+    struct tm t;
+    char buf[64];
+    memset(&t, 0, sizeof t);
+    t.tm_year = 123;   /* 2023 */
+    t.tm_mon  = 9;     /* 十月（0 起） */
+    t.tm_mday = 7;
+    t.tm_hour = 0;
+    t.tm_min  = 53;
+    t.tm_sec  = 41;
+    t.tm_wday = 6;     /* 周六 */
+    t.tm_yday = 279;   /* 年内第 280 天 */
+
+    memset(buf, 0, sizeof buf);
+    check(strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", &t) == 19,
+          "strftime 返回长度 19");
+    check(strcmp(buf, "2023-10-07 00:53:41") == 0, "strftime %Y-%m-%d %H:%M:%S");
+    printf("[wave2] strftime: %s\n", buf);
+
+    memset(buf, 0, sizeof buf);
+    strftime(buf, sizeof buf, "%a %b %e %I:%M %p %j %w %u", &t);
+    check(strcmp(buf, "Sat Oct  7 12:53 AM 280 6 6") == 0,
+          "strftime %a %b %e %I:%M %p %j %w %u");
+    printf("[wave2] strftime: [%s]\n", buf);
+
+    memset(buf, 0, sizeof buf);
+    strftime(buf, sizeof buf, "%F %T %D %R %% %Z %z", &t);
+    check(strcmp(buf, "2023-10-07 00:53:41 10/07/23 00:53 % UTC +0000") == 0,
+          "strftime %F %T %D %R %% %Z %z");
+    printf("[wave2] strftime: %s\n", buf);
+
+    /* 容量边界：POSIX 口径 max **含**结尾 NUL。 */
+    memset(buf, 0, sizeof buf);
+    check(strftime(buf, 11, "%Y-%m-%d", &t) == 10, "strftime 恰好放下 -> 10");
+    memset(buf, 0, sizeof buf);
+    check(strftime(buf, 10, "%Y-%m-%d", &t) == 0, "strftime 差一字节 -> 0");
+
+    /* 未知说明符按 POSIX 允许的方式原样输出，绝不静默丢弃。 */
+    memset(buf, 0, sizeof buf);
+    strftime(buf, sizeof buf, "<%Q>", &t);
+    check(strcmp(buf, "<%Q>") == 0, "strftime 未知说明符原样输出");
+}
+
+int main(int argc, char **argv) {
+    int i;
+    printf("[wave2] argc=%d pid=%d\n", argc, (int)getpid());
+    check(getpid() > 0, "getpid() > 0");
+    check(gettid() > 0, "gettid() > 0");
+    for (i = 0; i < argc; i++)
+        printf("[wave2] argv[%d]=%s\n", i, argv[i]);
+
+    /* 1. errno + strerror */
+    {
+        FILE *f = fopen("/nope/nope", "r");
+        check(f == NULL, "fopen(/nope/nope) 应失败");
+        if (!f) {
+            printf("[wave2] fopen(/nope/nope) -> %s (errno=%d)\n",
+                   strerror(errno), errno);
+            check(errno == ENOENT, "errno == ENOENT");
+            check(strcmp(strerror(errno), "No such file or directory") == 0,
+                  "strerror(ENOENT) 文本");
+        } else {
+            fclose(f);
+        }
+    }
+
+    /* 2. strftime（确定性） */
+    check_strftime();
+
+    /* 3. time/localtime：只要求拿到一个合理的 epoch */
+    {
+        time_t now = time(NULL);
+        struct tm *tmv = localtime(&now);
+        char buf[64];
+        check(now > 1600000000, "time() 合理");
+        check(tmv != NULL, "localtime 非空");
+        if (tmv && strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", tmv))
+            printf("[wave2] now=%s (t=%ld)\n", buf, (long)now);
+        else
+            check(0, "真实时间 strftime");
+    }
+
+    /* 4. 目录枚举 */
+    {
+        DIR *d = opendir(DIRPATH);
+        int n = 0;
+        check(d != NULL, "opendir 非空");
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL && n < 6) {
+                printf("[wave2] dirent: %s\n", e->d_name);
+                n++;
+            }
+            closedir(d);
+        }
+        check(n > 0, "readdir 至少一项");
+    }
+
+    /* 5. stat */
+    {
+        struct stat st;
+        int rc = stat(FILEPATH, &st);
+        check(rc == 0, "stat 成功");
+        if (rc == 0) {
+            printf("[wave2] stat %s: size=%ld mode=%o\n",
+                   FILEPATH, (long)st.st_size, (unsigned)st.st_mode);
+            check(st.st_size > 0, "hello.c 非空");
+        }
+    }
+
+    /* 6. 读文件 + ctype（统计"以字母结尾的词"个数） */
+    {
+        FILE *f = fopen(FILEPATH, "r");
+        int words = 0;
+        check(f != NULL, "fopen(hello.c)");
+        if (f) {
+            char line[256];
+            while (fgets(line, sizeof line, f)) {
+                char *p;
+                for (p = line; *p; p++)
+                    if (isalpha((unsigned char)*p) &&
+                        !isalpha((unsigned char)p[1]))
+                        words++;
+            }
+            fclose(f);
+            printf("[wave2] %s word-ends=%d\n", FILEPATH, words);
+            check(words > 0, "词尾计数 > 0");
+        }
+    }
+
+    /* 7. malloc + qsort + free */
+    {
+        const char *items[4];
+        const char **arr;
+        int n = 4;
+        items[0] = "delta"; items[1] = "alpha";
+        items[2] = "charlie"; items[3] = "bravo";
+        arr = (const char **)malloc(sizeof(const char *) * (size_t)n);
+        check(arr != NULL, "malloc 非空");
+        if (!arr)
+            return 1;
+        for (i = 0; i < n; i++)
+            arr[i] = items[i];
+        qsort(arr, (size_t)n, sizeof(const char *), cmp_str);
+        printf("[wave2] sorted:");
+        for (i = 0; i < n; i++)
+            printf(" %s", arr[i]);
+        printf("\n");
+        check(strcmp(arr[0], "alpha") == 0 && strcmp(arr[3], "delta") == 0,
+              "qsort 顺序");
+        free(arr);
+    }
+
+    /* 8. getenv */
+    {
+        const char *path = getenv("PATH");
+        printf("[wave2] PATH=%s\n", path ? path : "(null)");
+        check(path != NULL && path[0] != 0, "PATH 非空");
+    }
+
+    if (fails) {
+        printf("[wave2] %d 项断言失败\n", fails);
+        return 1;
+    }
+    printf("[wave2] all checks passed\n");
+    return 0;
+}

@@ -1857,4 +1857,39 @@ hello from tcc inside BORUIX
 ⇒ 同一条链上的四道墙（shell 列表/PATH、`exec_path` cwd 继承、内核帧返回路径 `sysretq`、
 libc 堆扩展泄漏）全部修复后，**3P6-1 结项**。
 
+## 🎯 第 55 次：3P6-2 第二波——tcc 驱动的真实缺口（`strftime` 缺失 + `getpid` 无声明）
+
+新增驱动 `tests/wave2.c`：一个「系统内小工具」（打印 argv / 读文件统计词尾 / 列目录 /
+格式化时间 / 报告 errno / qsort / getenv / stat）。用它在 BORUIX 内编译，**报错即清单**：
+
+```text
+wave2.c:29: warning: implicit declaration of function 'getpid'
+wave2.c:48: warning: implicit declaration of function 'strftime'
+tcc: error: unresolved reference to 'strftime'
+```
+
+两项都是**真实缺口**，不是预猜：
+
+1. **`strftime` 头文件未声明、库里也无实现** ⇒ 在 `libc/src/time.rs` 实现（容量按 POSIX
+   口径 = `max` 含结尾 NUL；放不下返回 0；未知说明符原样输出；`E`/`O` 修饰符按 POSIX
+   允许忽略；`%z`/`%Z` 恒为 `+0000`/`UTC`——本系统无时区数据库，是事实陈述），并在
+   `libc/include/time.h` 声明。支持集与**未实现项**（`%c %x %X %U %W %V %G %g %s`）
+   在函数文档里显式列出（S09 不夸大）。
+2. **`getpid` 实现早在**（`libc/src/process.rs`），缺的只是 `<unistd.h>` 里的**声明** ⇒
+   在 unistd.h 里 `#include <sys/types.h>`（`pid_t` 的 POSIX 归属）并声明 `getpid`/`gettid`。
+
+修完重跑（驱动改成**自检**：8 组断言，含 strftime 的确定性输出与容量边界）：
+
+```text
+[wave2] strftime: 2023-10-07 00:53:41
+[wave2] strftime: [Sat Oct  7 12:53 AM 280 6 6]
+[wave2] strftime: 2023-10-07 00:53:41 10/07/23 00:53 % UTC +0000
+[wave2] all checks passed
+[init] run exited with code 0 (0 = all assertions passed)
+```
+
+⇒ **编译零告警零错误、断言全过**。`realpath`/regex/`sigsetjmp` 等仍未覆盖——本轮驱动没用到，
+故不预猜不先补；下一批驱动的自然来源是 3P6-3（GCC 会大面积使用 libc）。
+
+
 
