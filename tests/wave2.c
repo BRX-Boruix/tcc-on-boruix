@@ -25,6 +25,7 @@
 #include <sys/wait.h>
 #include <dirent.h>
 #include <grp.h>
+#include <libgen.h>
 #include <fcntl.h>
 #include <boruix.h>
 
@@ -403,6 +404,83 @@ int main(int argc, char **argv) {
         FILE *f = fopen("/nope/nope", "r");
         check(f == NULL, "fopen 失败（供 perror 测试）");
         perror("wave2-perror");
+    }
+
+    /* 12. A 批剩下的 4 组：libgen / 时间格式化与反解 / clock_gettime / 环境表修改 */
+    {
+        char a1[] = "/usr/lib";
+        char a2[] = "/usr/";
+        char a3[] = "/";
+        char a4[] = "";
+        char a5[] = "/usr/lib";
+        char a6[] = "/usr/";
+        char a7[] = "usr";
+        char a8[] = "/";
+        check(strcmp(basename(a1), "lib") == 0, "basename(/usr/lib)==lib");
+        check(strcmp(basename(a2), "usr") == 0, "basename(/usr/)==usr");
+        check(strcmp(basename(a3), "/") == 0, "basename(/)==/");
+        check(strcmp(basename(a4), ".") == 0, "basename(空)==.");
+        /* dirname 返回静态缓冲：一次只比较一个（这正是它文档里写明的边界）。 */
+        check(strcmp(dirname(a5), "/usr") == 0, "dirname(/usr/lib)==/usr");
+        check(strcmp(dirname(a6), "/") == 0, "dirname(/usr/)==/");
+        check(strcmp(dirname(a7), ".") == 0, "dirname(usr)==.");
+        check(strcmp(dirname(a8), "/") == 0, "dirname(/)==/");
+    }
+    {
+        struct tm t;
+        struct tm *back;
+        time_t e;
+        char *s;
+        memset(&t, 0, sizeof t);
+        t.tm_year = 123;
+        t.tm_mon = 9;
+        t.tm_mday = 7;
+        t.tm_hour = 0;
+        t.tm_min = 53;
+        t.tm_sec = 41;
+        e = mktime(&t);
+        s = asctime(&t);
+        printf("[wave2] mktime=%ld asctime='%s'\n", (long)e, s ? s : "(null)");
+        check(e == 1696640021, "mktime(2023-10-07 00:53:41 UTC) == 1696640021");
+        check(t.tm_wday == 6, "mktime 归一化写回 tm_wday（周六=6）");
+        back = localtime(&e);
+        check(back != NULL && back->tm_year == 123 && back->tm_mon == 9 && back->tm_mday == 7,
+              "mktime -> localtime 往返一致");
+        s = ctime(&e);
+        check(s != NULL && strncmp(s, "Sat Oct  7", 10) == 0, "ctime 前缀 Sat Oct  7");
+    }
+    {
+        struct timespec ts;
+        int rc;
+        rc = clock_gettime(CLOCK_REALTIME, &ts);
+        printf("[wave2] clock_gettime(REALTIME) rc=%d sec=%ld nsec=%ld\n",
+               rc, (long)ts.tv_sec, (long)ts.tv_nsec);
+        check(rc == 0 && ts.tv_sec > 1600000000, "CLOCK_REALTIME 可用且值合理");
+        rc = clock_gettime(CLOCK_MONOTONIC, &ts);
+        printf("[wave2] clock_gettime(MONOTONIC) rc=%d errno=%d\n", rc, errno);
+        check(rc == -1 && errno == 22, "CLOCK_MONOTONIC 如实 EINVAL（本系统无单调时钟源）");
+    }
+    {
+        const char *v;
+        static char pe[] = "W2_B=put";
+        check(setenv("W2_A", "one", 1) == 0, "setenv 新增");
+        v = getenv("W2_A");
+        check(v != NULL && strcmp(v, "one") == 0, "getenv 读到 one");
+        check(setenv("W2_A", "two", 0) == 0, "setenv overwrite=0 返回 0");
+        v = getenv("W2_A");
+        check(v != NULL && strcmp(v, "one") == 0, "overwrite=0 时不覆盖");
+        check(setenv("W2_A", "two", 1) == 0, "setenv 覆盖");
+        v = getenv("W2_A");
+        check(v != NULL && strcmp(v, "two") == 0, "覆盖后读到 two");
+        check(setenv("", "x", 1) == -1, "空名字如实 -1");
+        check(setenv("A=B", "x", 1) == -1, "名字含 = 如实 -1");
+        check(unsetenv("W2_A") == 0, "unsetenv");
+        check(getenv("W2_A") == NULL, "unsetenv 后 getenv 为 NULL");
+        check(putenv(pe) == 0, "putenv");
+        v = getenv("W2_B");
+        check(v != NULL && strcmp(v, "put") == 0, "putenv 后 getenv 读到 put");
+        check(clearenv() == 0, "clearenv");
+        check(getenv("PATH") == NULL, "clearenv 后 PATH 为 NULL");
     }
     if (fails) {
         printf("[wave2] %d 项断言失败\n", fails);
