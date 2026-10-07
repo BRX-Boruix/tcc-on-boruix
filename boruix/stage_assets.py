@@ -92,7 +92,7 @@ def main():
     #    `\n` 在某层被解释成真换行，导致 C 字符串字面量断行（tcc 报
     #    `missing terminating " character`）。正本只有一份，拷贝没有转义问题。
     disk_root = os.path.dirname(dest)          # diskfiles/3p
-    for name in ("hello.c", "wave2.c"):
+    for name in ("hello.c", "wave2.c", "forkmin.c"):
         src = os.path.join(SRC, "tests", name)
         if os.path.isfile(src):
             shutil.copy(src, os.path.join(disk_root, name))
