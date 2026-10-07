@@ -1749,3 +1749,64 @@ GPR」、以及为什么只在长循环里出现（短循环来不及被抢占�
   **SIGSEGV（根因五）** 变为 **`tcc: memory full`**——干净的错误退出，不再是寄存器被写坏。
   ⇒ 根因五（内核帧返回路径）**已修复**；下一道坎是 tcc 编译 hello.c 的**内存需求**
   （默认 256 MiB 下堆上限约 56 MiB，tcc 载入 libc.a 后触顶）。
+
+## 🎯 第 52–53 次：内存墙定位——**不是配额，是 libc 的 `heap_extend` 漏掉扩展尾巴**
+
+### 第 52 次：`memory full` 与物理内存无关
+
+修掉根因五后，tcc 的失败点变成 `tcc: memory full`。按既有结论（单进程配额 = 物理/4），
+把 QEMU 内存从 256 MiB 提到 1 GiB、2 GiB 重跑：
+
+| 物理内存 | 单进程配额（total_frames×4096/4） | tcc 结果 |
+| :--- | :--- | :--- |
+| 256 MiB | ~67 MiB | `tcc: memory full` |
+| 1 GiB | ~247 MiB | `tcc: memory full` |
+| 2 GiB | ~494 MiB | `tcc: memory full` |
+
+⇒ **墙不随物理内存走** ⇒ 不是配额。
+
+对照探针 `boruix/probe_heapwall.c`（600 × 1 MiB malloc，开 `boruix_heap_diag(1)`）在 1 GiB 下：
+
+```text
+[HW] start brk=4294967296
+[HW] ok #239 total=245760KB brk=4547608576
+[HW] FAIL #244 total=249856KB brk=4551819264
+```
+
+⇒ **C 堆本身能用满 244 MiB 配额**，所以配额与 brk 通路都是好的。
+
+### 第 53 次：根因——`libc::malloc` 的 `heap_extend` 把扩展尾巴永久泄漏
+
+`libc/src/malloc.rs`：
+
+```text
+heap_extend(need):   grow = need.max(64 KiB); brk(cur + grow) -> new_brk;  返回 cur
+heap_alloc_block():  base = heap_extend(need); set_block_size(base, need); freelist_insert(base);
+```
+
+即 **`brk` 推上去了 `grow`，但只有 `need` 被登记进空闲表**——`[cur+need, new_brk)` 既不空闲
+也不可达，**永久泄漏**（每次最多 64 KiB）。
+
+tcc 编译 `hello.c` 时反复申请小块；每当空闲表没有合适块，就触发一次扩展并漏掉最多 64 KiB。
+累计把配额吃光 ⇒ `tcc_malloc` 返回 NULL ⇒ `tcc: memory full`。**且泄漏量与配额同步增长，
+故把物理内存加倍也没用**——与第 52 次的实测完全一致。
+（探针只做 1 MiB 大块，`grow == need`，故测不到该缺陷——这也解释了它为什么一直没被抓到。）
+
+**修法**：`heap_extend` 把整段 `[cur, new_brk)` 登记为一个空闲块（`freelist_insert` 会与
+左邻合并），`heap_alloc_block` 扩展后再 `freelist_take(need)` 一次。
+
+### 验收结果（3P6-1 链路推进）
+
+```text
+[init] running non-interactive command: cd /volumes/BORUIX_DATA/3p && tcc hello.c -o hello && ./hello
+[exec] 动态可执行文件（PT_INTERP）暂不支持：解释器装载尚未接线
+boruix: cannot execute ./hello: not supported (errno=95)
+[init] run exited with code 126
+```
+
+- **`tcc: memory full` 消失**——tcc **成功编译并链接出 `hello`**（第 4 次以来第一次越过内存墙）；
+- 新卡点：tcc 默认产出**动态可执行文件**（含 `PT_INTERP`），而内核加载器如实拒绝
+  （`loader/src/lib.rs`：解释器装载尚未接线）⇒ `./hello` 报 ENOTSUP(95)。
+  下一步二选一：(a) 让本移植的 tcc 在 Boruix 上**默认静态链接**（`-static`；系统当前只有
+  静态可执行文件）；(b) 接线 `PT_INTERP` + rtld（阶段 5 的动态链接路径）。
+
