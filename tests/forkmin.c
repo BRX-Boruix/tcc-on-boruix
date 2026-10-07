@@ -1,77 +1,108 @@
-/* forkmin.c —— fork/waitpid 挂起的**最小复现**（目标第 2 轮）。
+/* forkmin.c —— fork/waitpid 挂起的**最小复现**（目标第 2~4 轮）。
  *
- * 背景：tcc-on-boruix/tests/wave2.c 的 fork 段在当前环境下 100% 挂起（连续 6 次），
- * 且已判定**不是** libc 改动引入的回归（A/B 回退到第 62 轮状态同样 2/2 挂起）。
- * 现象停在 [cow] clone 之后 —— 即 fork 已成功、子进程已存在，父进程卡在等待处。
+ * 已确认的事实：
+ *   - 裸 fork + 子 _exit(42) + 父 waitpid：**通过**（第 2 轮）。
+ *   - 只要在 fork 前 malloc 并**逐页触碰** 16 KB（4 页堆，地址 0x100000010 = USER_HEAP_BASE+0x10）：
+ *     **挂起**（第 3 轮；fork 已返回、子进程跑到 _exit 前一行、父进程 waitpid 再不返回）。
+ *   - BSS 加减 8 KB 无影响（第 1 轮）——因为 BSS 不是堆。
  *
- * 本程序把场景缩到最小，并在**每一步都 fflush**，使串口日志能精确显示停在哪一行：
- *   ① 父：fork 之前
- *   ② 子：即将 _exit(42)        <- 若日志停在这行之后，说明子进程没退出去
- *   ③ 父：fork 返回了 pid       <- 若停在这行之前，说明 fork 本身没返回
- *   ④ 父：waitpid 返回          <- 若停在这行之前，说明是 exit->wait 的唤醒问题
+ * 用法（argv）：
+ *   forkmin                     裸跑（不 malloc）
+ *   forkmin <KB>                malloc 并逐页触碰 <KB> 后 fork（直接 worker）
+ *   forkmin worker <KB> [alloc] worker 形态；带 alloc 表示**只 malloc 不触碰**（对照组）
+ *   forkmin nowait <KB> [alloc] fork 出 worker 后**父进程立刻返回**
+ *
+ * 为什么要有 nowait：一个用例挂起会让 shell 卡在分号处、后面的用例跑不到。
+ * nowait 让 shell 立刻继续，各 worker 并发跑，于是一次启动就能拿到全部尺寸的结果：
+ * 日志里打印了 "waitpid ->" 的 tag 是通过的，停在 "fork returned" 的是挂起的。
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
-/* 可选：先分配并**逐页触碰** argv[1] 指定的 KB 数，再 fork。
- * 目的：验证「挂起与地址空间大小相关」这一假设——forkmin 裸跑是**通过**的，
- * 而 wave2（约 150 页）100% 挂起，故下一步就是把大小当作自变量扫一遍。 */
-static char *touch_kb(long kb) {
+static char *touch_kb(long kb, int do_touch) {
     long n = kb * 1024;
-    char *p = (char *)malloc((size_t)n);
+    char *p;
     long i;
+    if (kb <= 0) {
+        return (char *)1; /* 非 NULL 哨兵：表示没有分配 */
+    }
+    p = (char *)malloc((size_t)n);
     if (p == NULL) {
         return NULL;
     }
-    for (i = 0; i < n; i += 4096) {
-        p[i] = (char)(i & 0x7f);
+    if (do_touch) {
+        for (i = 0; i < n; i += 4096) {
+            p[i] = (char)(i & 0x7f);
+        }
     }
     return p;
 }
 
-int main(int argc, char **argv) {
+/* 一个用例：触碰 -> fork -> 子 _exit(42) -> 父 waitpid。每步 fflush，日志能精确定位。 */
+static int worker(long kb, int do_touch, const char *tag) {
+    char *blob;
     int pid;
     int st = 0;
     int got;
-    char *blob = NULL;
 
-    if (argc > 1) {
-        long kb = atol(argv[1]);
-        blob = touch_kb(kb);
-        if (blob == NULL) {
-            printf("forkmin: 0) malloc/touch %ld KB FAILED\n", kb);
-            fflush(stdout);
-            return 2;
-        }
-        printf("forkmin: 0) touched %ld KB at %p\n", kb, (void *)blob);
+    blob = touch_kb(kb, do_touch);
+    if (blob == NULL) {
+        printf("[%s] malloc %ld KB FAILED\n", tag, kb);
         fflush(stdout);
+        return 2;
     }
-
-    printf("forkmin: 1) before fork (pid=%d)\n", (int)getpid());
+    printf("[%s] touched=%d kb=%ld\n", tag, do_touch, kb);
     fflush(stdout);
 
     pid = fork();
-
     if (pid == 0) {
-        printf("forkmin: 2) child running, exiting 42\n");
+        printf("[%s] child exiting 42\n", tag);
         fflush(stdout);
         _exit(42);
     }
-
-    printf("forkmin: 3) fork returned pid=%d\n", pid);
+    printf("[%s] fork returned %d\n", tag, pid);
     fflush(stdout);
 
     got = waitpid(pid, &st, 0);
-    printf("forkmin: 4) waitpid -> %d status=%d WIFEXITED=%d WEXITSTATUS=%d\n",
-           got, st, WIFEXITED(st), WEXITSTATUS(st));
+    printf("[%s] waitpid -> %d status=%d code=%d\n", tag, got, st, WEXITSTATUS(st));
     fflush(stdout);
 
     if (got == pid && WIFEXITED(st) && WEXITSTATUS(st) == 42) {
-        printf("forkmin: OK\n");
+        printf("[%s] OK\n", tag);
         return 0;
     }
-    printf("forkmin: FAIL\n");
+    printf("[%s] FAIL\n", tag);
     return 1;
+}
+
+int main(int argc, char **argv) {
+    long kb = 0;
+    int do_touch = 1;
+
+    if (argc >= 2 && strcmp(argv[1], "worker") == 0) {
+        kb = (argc >= 3) ? atol(argv[2]) : 0;
+        if (argc >= 4 && strcmp(argv[3], "alloc") == 0) {
+            do_touch = 0;
+        }
+        return worker(kb, do_touch, (argc >= 3) ? argv[2] : "0");
+    }
+    if (argc >= 3 && strcmp(argv[1], "nowait") == 0) {
+        kb = atol(argv[2]);
+        if (argc >= 4 && strcmp(argv[3], "alloc") == 0) {
+            do_touch = 0;
+        }
+        printf("[main] spawn kb=%ld touch=%d\n", kb, do_touch);
+        fflush(stdout);
+        if (fork() == 0) {
+            _exit(worker(kb, do_touch, argv[2]));
+        }
+        return 0;
+    }
+    if (argc >= 2) {
+        kb = atol(argv[1]);
+    }
+    return worker(kb, do_touch, (argc >= 2) ? argv[1] : "0");
 }
