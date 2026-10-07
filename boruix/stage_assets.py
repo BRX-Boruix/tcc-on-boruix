@@ -87,13 +87,18 @@ def main():
     else:
         print("[stage] 警告：未找到 libtcc1.a，先跑 boruix/build_libtcc1.py")
 
-    # 5) 验收夹具 hello.c：从**正本**（tests/hello.c）拷到磁盘。
+    # 5) 验收/驱动夹具：从**正本**（tests/*.c）拷到磁盘。
     #    为什么要脚本拷而不是手工写：手工经多层引号/转义拼源码出过事——
     #    `\n` 在某层被解释成真换行，导致 C 字符串字面量断行（tcc 报
     #    `missing terminating " character`）。正本只有一份，拷贝没有转义问题。
     disk_root = os.path.dirname(dest)          # diskfiles/3p
-    shutil.copy(os.path.join(SRC, "tests", "hello.c"), os.path.join(disk_root, "hello.c"))
-    print("[stage] hello.c <- tests/hello.c")
+    for name in ("hello.c", "wave2.c"):
+        src = os.path.join(SRC, "tests", name)
+        if os.path.isfile(src):
+            shutil.copy(src, os.path.join(disk_root, name))
+            print("[stage] %s <- tests/%s" % (name, name))
+        else:
+            print("[stage] 警告：未找到 tests/%s" % name)
     return 0
 
 
