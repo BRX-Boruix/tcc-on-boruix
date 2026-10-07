@@ -295,8 +295,6 @@ int main(int argc, char **argv) {
         }
         check(drc == dpid && WEXITSTATUS(dst) == 42, "判别：拿到子进程退出码 42");
     }
-#if 0 /* 隔离实验（第 63 轮）：暂时关掉 fork 段，先拿到第 10/11/12 组的运行证据，
-       * 并把「挂起是否只发生在 fork 段」这一判定做出来。见 docs/TODO/3p.md 的下一步。 */
     /* fork + waitpid + W* 宏（<sys/wait.h>）：真起一个子进程、真收它的退出码。 */
     {
         int pid;
@@ -315,7 +313,6 @@ int main(int argc, char **argv) {
             check(WIFEXITED(st) != 0 && WEXITSTATUS(st) == 42, "WEXITSTATUS == 42");
         }
     }
-#endif /* fork 段隔离实验 */
 
     /* 10. 3P6-2「整项缺失」类：身份查询（getuid/geteuid/getgid/getegid）与 dup。
      * 这些此前**既没实现也没声明**（反向对账清单列出来的），所以不能只验"能编译"——
