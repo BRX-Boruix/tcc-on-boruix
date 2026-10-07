@@ -4,9 +4,11 @@
 
 把 **TCC**（Tiny C Compiler）带到 BORUIX 上——让这个系统能**在自己内部**编译 C 程序。
 
-> **仓库状态：进行中。** 全部核心源文件已能编译并链接出 `tcc.elf`（1.17 MB）；**它已在 BORUIX 内运行**
-> （`tcc -v` 输出版本），且能**编译** `hello.c`（头文件生效、无编译错误）。
-> 卡在**链接**：tcc 找不到/不接受我们的 CRT 与库——见 [`boruix/CRT-AND-LIBS`](boruix/CRT-AND-LIBS)。
+> **仓库状态：已可用（2026-10 起）。** `tcc.elf` 在 BORUIX 内运行，并能对系统内的 C 程序完成
+> **编译 + 链接 + 运行**全链路：`3P6-1` 的 `tcc hello.c -o hello && ./hello`、`3P6-4` 的系统内编译
+> cowsay、`3P6-5` 的源码包在机编译，均已验收。
+> 此前这里写「卡在链接：tcc 找不到/不接受我们的 CRT 与库」——**那是过期的**：该卡点已解决，
+> 排查全过程留在 [`boruix/CRT-AND-LIBS`](boruix/CRT-AND-LIBS)（**历史日志，勿当现状读**）。
 
 ---
 
