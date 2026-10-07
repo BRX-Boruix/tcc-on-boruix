@@ -25,6 +25,26 @@
  * 动态加载路径（`-run` 的 dlopen 分支），这是**如实**的选择而不是缺失。 */
 #define CONFIG_TCC_STATIC 1
 
+/* **默认静态链接**：tcc 的**产物**也走静态（不只是 tcc 自己）。
+ *
+ * 为什么必须：tcc 默认产出**动态**可执行文件——它会加 `.interp` 段（PT_INTERP）并
+ * 指望内核去装载解释器（ld-linux 那一路）。BORUIX 的加载器**如实拒绝**这种镜像
+ * （`loader/src/lib.rs`：解析到 PT_INTERP 后返回 NotSupported，「解释器装载尚未接线」），
+ * 于是 `tcc hello.c -o hello && ./hello` 会以 ENOTSUP(95) 失败——**编译是成功的，
+ * 失败在"装载产物"这一步**（实测：`[exec] 动态可执行文件（PT_INTERP）暂不支持`）。
+ *
+ * 而 BORUIX 用户态**当前只有静态可执行文件**（内核 payload 里的程序、数据盘上的
+ * `*.elf` 全是静态；动态链接路径见阶段 5 / rtld）。既然系统里没有可用的解释器，
+ * 让 tcc 默认产出静态镜像就是**与系统现状一致**的默认值，而不是绕过：
+ * `CONFIG_TCC_SWITCHES` 是上游为「预定义选项」留的官方配置点（libtcc.c 在 tcc_new()
+ * 里 `tcc_set_options(s, CONFIG_TCC_SWITCHES)`），因此**不需要改上游源码**。
+ *
+ * **诚实边界**：上游 tcc **没有** `-dynamic` 选项（只有 `-static`），故本移植目前
+ * **无法产出动态可执行文件**；产出共享库（`-shared`）不受影响。将来若接线
+ * PT_INTERP + rtld，正确做法是给 tcc 补一个 `-dynamic`（或让默认按"系统里有没有
+ * 可用的解释器"决定），而不是删掉这一行。 */
+#define CONFIG_TCC_SWITCHES "-static"
+
 /* 关闭线程锁：tcc 默认用 POSIX 信号量（<semaphore.h>）保护"libtcc 被多线程共用"的场景，
  * 而 BORUIX 的 libc 不提供 POSIX 信号量。
  *

@@ -1810,3 +1810,51 @@ boruix: cannot execute ./hello: not supported (errno=95)
   下一步二选一：(a) 让本移植的 tcc 在 Boruix 上**默认静态链接**（`-static`；系统当前只有
   静态可执行文件）；(b) 接线 `PT_INTERP` + rtld（阶段 5 的动态链接路径）。
 
+## ✅ 第 54 次：**3P6-1 验收达标**——系统内 `tcc hello.c -o hello && ./hello` 跑通
+
+### 卡点收尾：tcc 默认产出动态镜像，加载器如实拒绝
+
+越过内存墙后 tcc 已能编出 `hello`，但 `./hello` 报 ENOTSUP(95)：
+
+```text
+[exec] 动态可执行文件（PT_INTERP）暂不支持：解释器装载尚未接线
+boruix: cannot execute ./hello: not supported (errno=95)
+```
+
+tcc 默认产出**动态**可执行文件（`tccelf.c` 在 `!s1->static_link` 时加 `.interp`/`.dynamic`），
+而 BORUIX 的内核加载器解析到 PT_INTERP 后如实返回 NotSupported。先验证静态路径可行：
+
+```text
+[init] running non-interactive command: cd /volumes/BORUIX_DATA/3p && tcc -static hello.c -o hello && ./hello
+hello from tcc inside BORUIX
+[init] run exited with code 0
+```
+
+⇒ 静态链接一路（crt1.o/crti.o/crtn.o + libc.a + libtcc1.a）完全可用，问题**只在默认值**。
+
+### 修法：把「产物默认静态」做成配置，不动上游源码
+
+`boruix/config.h` 新增 `#define CONFIG_TCC_SWITCHES "-static"`。这是上游为「预定义选项」
+留的官方配置点（`libtcc.c` 的 `tcc_new()` 会 `tcc_set_options(s, CONFIG_TCC_SWITCHES)`），
+故**零上游补丁**——与本移植「补丁压到最小」的既有纪律一致（见 `boruix/UPSTREAM-PATCHES`）。
+
+**诚实边界**：上游 tcc 没有 `-dynamic`（只有 `-static`），故本移植目前无法产出动态可执行文件
+（`-shared` 不受影响）。将来接线 PT_INTERP + rtld 时，正确做法是给 tcc 补 `-dynamic`
+（或让默认按「系统里有没有可用解释器」决定），而不是删掉这一行。
+
+### 最终验收（字面命令，无 `-static`）
+
+```text
+[init] running non-interactive command: cd /volumes/BORUIX_DATA/3p && tcc hello.c -o hello && ./hello
+hello from tcc inside BORUIX
+[init] run exited with code 0 (0 = all assertions passed)
+```
+
+- `hello from tcc inside BORUIX` 是 `tests/hello.c` 的 `printf` 输出；
+- 产物非陈旧：`--redisk` 每次从 `tools/diskfiles/3p/` 重建数据盘，该目录只有 `hello.c`（无 `hello`）；
+- 反向对照：静态默认之前，**同一条命令**编译成功但 `./hello` 报 ENOTSUP(95)。
+
+⇒ 同一条链上的四道墙（shell 列表/PATH、`exec_path` cwd 继承、内核帧返回路径 `sysretq`、
+libc 堆扩展泄漏）全部修复后，**3P6-1 结项**。
+
+
