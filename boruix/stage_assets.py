@@ -55,9 +55,20 @@ def main():
 
     # 1) 头文件：tcc 自带的（stdarg/stddef/stdbool/float/... 属编译器支持）先铺，
     #    再用我们 libc 的头覆盖同名者（C 库头应当以我们的为准）。
+    #    **跳过 sysroot 里的 `c++/`**（2026-10 实测的缺陷链）：那是 libstdc++ 的头，
+    #    tcc 用不到；更糟的是它有 800+ 个文件，会把这个目录撑到需要**多块目录**，
+    #    而 `tools/tools_build/disk.py` 的 EXT2 写入器当时只支持单块目录 ⇒ 建盘直接崩
+    #    （`struct.error: pack_into requires a buffer of at least 1028 bytes`）。
+    #    两处都修了：这里不铺，disk.py 也支持多块目录（不再依赖"目录一定很小"这个假设）。
+    stale_cxx = os.path.join(inc, "c++")
+    if os.path.isdir(stale_cxx):
+        shutil.rmtree(stale_cxx)
+        print("[stage] 清掉旧的 include/c++（tcc 用不到；曾撑爆单块目录）")
     n = 0
     for d, src in ((inc, os.path.join(SRC, "include")), (inc, inc_src)):
-        for root, _dirs, files in os.walk(src):
+        for root, dirs, files in os.walk(src):
+            if src == inc_src:
+                dirs[:] = [x for x in dirs if x != "c++"]
             rel = os.path.relpath(root, src)
             outdir = os.path.join(d, rel) if rel != "." else d
             os.makedirs(outdir, exist_ok=True)
