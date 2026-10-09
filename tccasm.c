@@ -799,6 +799,19 @@ static void asm_parse_directive(TCCState *s1, int global)
     case TOK_ASMDIR_file:
         {
             const char *p;
+            /* **必须保存/恢复 parse_flags**（2026-10 实测的真 bug）。
+             *
+             * 这里清 PARSE_FLAG_TOK_STR 是为了让紧随其后的**文件号**不被当成字符串
+             * （GNU as 接受 `.file <number> "name"`）。但汇编器默认是
+             * `PARSE_FLAG_ASM_FILE | PARSE_FLAG_TOK_STR`（见 tccasm.c 的
+             * tcc_assemble_internal），而本处理器此前**清掉后从不恢复** ⇒ 一旦输入里
+             * 出现过 `.file`，**其后所有字符串都不再词法成 TOK_STR**，于是任何
+             * `.string/.ascii/.asciz` 都会报 "string constant expected"。
+             *
+             * 实测形态：GCC 生成的 `.s` 第一行就是 `.file "x.c"`，故第 6 行的
+             * `.string "..."` 必然失败；而**不含 `.file` 的手写 `.s` 正常** ——
+             * 正是这条差异把范围逼到这里。 */
+            int saved_parse_flags = parse_flags;
             parse_flags &= ~PARSE_FLAG_TOK_STR;
             next();
             if (tok == TOK_PPNUM)
@@ -809,10 +822,12 @@ static void asm_parse_directive(TCCState *s1, int global)
             } else if (tok >= TOK_IDENT) {
                 p = get_tok_str(tok, &tokc);
             } else {
+                parse_flags = saved_parse_flags;   /* 错误路径同样恢复 */
                 skip_to_eol(0);
                 break;
             }
             tccpp_putfile(p);
+            parse_flags = saved_parse_flags;       /* 正常路径恢复 */
             next();
         }
         break;

@@ -1955,6 +1955,23 @@ static void tcc_add_linker_symbols(TCCState *s1)
     add_init_array_defines(s1, ".preinit_array");
     add_init_array_defines(s1, ".init_array");
     add_init_array_defines(s1, ".fini_array");
+    /* **旧式 .ctors/.dtors 的边界符号**（2026-10 实测补齐）。
+     *
+     * 为什么必须有：本系统的入口桥接（csrc/boruix_crt.h）**同时**遍历现代组
+     * （.init_array/.fini_array）与旧式组（.ctors/.dtors），因此它无条件引用
+     * __ctors_start/__ctors_end/__dtors_start/__dtors_end 四个符号。
+     *
+     * 两条链接配方必须**同步**：
+     *   - sysroot 的 C 驱动走 csrc/linker.ld —— 那里已定义（同一轮加的）；
+     *   - tcc 走它**自己的内部链接器**，不读 linker.ld —— 就是这里。
+     * 缺这一处时实测：tcc 链 GCC 汇编产物报
+     *   unresolved reference to '__ctors_end' / '__ctors_start' / '__dtors_start' / '__dtors_end'。
+     *
+     * 命名由 add_init_array_defines 从节名推导（".ctors" → "__ctors_start/end"），
+     * 与 CRT 的命名天然一致。节不存在时该函数把符号定在 text_section 偏移 0
+     * ⇒ start == end ⇒ 空区间，正是我们要的"没有旧式构造函数"语义。 */
+    add_init_array_defines(s1, ".ctors");
+    add_init_array_defines(s1, ".dtors");
     /* add start and stop symbols for sections whose name can be
        expressed in C */
     for(i = 1; i < s1->nb_sections; i++) {
