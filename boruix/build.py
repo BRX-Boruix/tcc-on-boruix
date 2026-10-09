@@ -84,11 +84,16 @@ def main():
     for f in CORE:
         o = os.path.join(BUILD, f[:-2] + ".o")
         cf = cflags + ([autoinit_flag] if f in autoinit_files else [])
+        # **显式 UTF-8 + errors="replace"**（S02：不依赖系统默认编码）。
+        # 原实现用 text=True ⇒ Python 按平台默认编码解码；Windows 上是 gbk，
+        # 而编译器输出是 UTF-8 ⇒ 源码里出现任何非 ASCII 字符就让构建脚本抛
+        # UnicodeDecodeError（2026-10 实测：只在诊断字符串里写了一句中文就触发）。
         r = subprocess.run([cc] + cf + ["-c", os.path.join(SRC, f), "-o", o],
-                           capture_output=True, text=True)
+                           capture_output=True)
         if r.returncode != 0:
             bad += 1
-            errs = [l for l in r.stderr.splitlines() if "error" in l]
+            err_txt = (r.stderr or b"").decode("utf-8", "replace")
+            errs = [l for l in err_txt.splitlines() if "error" in l]
             print("%-16s %d 错" % (f, len(errs)))
             for l in errs[:4 if not a.verbose else 999]:
                 print("      " + l.strip()[:150])
@@ -109,10 +114,10 @@ def main():
            os.path.join(lib, "user_main_argv.o")] + objs + [
            os.path.join(lib, "libc.a"), "-z", "noexecstack", "-z", "norelro",
            "-T", os.path.join(lib, "linker.ld")]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True)   # 同上：显式解码，不用平台默认编码
     if r.returncode != 0:
         print("\n链接失败：")
-        for l in r.stderr.splitlines()[:40]:
+        for l in (r.stderr or b"").decode("utf-8", "replace").splitlines()[:40]:
             print("  " + l.strip()[:150])
         return 1
     print("\n[build_tcc] " + out)
