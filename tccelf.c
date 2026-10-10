@@ -2810,8 +2810,23 @@ static int tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr)
         s = s1->sections[i];
         if (s->sh_type != SHT_NOBITS) {
             while (offset < s->sh_offset) {
-                fputc(0, f);
-                offset++;
+                /* **成块写零**（本移植性能修补，见 boruix/UPSTREAM-PATCHES）。
+                 *
+                 * 上游此处是 `fputc(0, f)` **一字节一次**。`.bss`(SHT_NOBITS) 不写
+                 * 数据，但下一个节的 `sh_offset` 仍**跨过整段 `.bss`**，于是这段空洞
+                 * 只能逐字节补出来。大 `.bss` 的程序会产生**数百万次** `fputc`；
+                 * 在 Boruix 上每次都可能落到一次 `write` 系统调用，实测占满
+                 * `tcc_output_file` 的约 50 秒（-bench 量不到——它的 end_time 在
+                 * 调用 tcc_output_file **之前**就取好了，见 tcc.c:392/408）。
+                 *
+                 * 改为成块 `fwrite` 零缓冲：**输出逐字节完全相同**（同一串零、同一
+                 * 长度），只把调用次数从 O(字节数) 降到 O(字节数/4096)。这不是
+                 * "用超时/重试掩盖"，是消除根因。 */
+                static const char zeros[4096];
+                size_t n = (size_t)(s->sh_offset - offset);
+                if (n > sizeof(zeros))
+                    n = sizeof(zeros);
+                offset += fwrite(zeros, 1, n, f);
             }
             size = s->sh_size;
             if (size)
