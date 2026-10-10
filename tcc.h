@@ -888,6 +888,11 @@ struct TCCState {
     /* sections */
     Section **sections;
     int nb_sections; /* number of sections, including first dummy section */
+    /* 与 sections **同步**的紧凑节名哈希数组（见 tccelf.c 的 sec_hash_push）。
+     * 存在的理由：节合并是线性扫，链接 libc.a 时那个循环体执行 2,300 万次；
+     * 把哈希码放进紧凑数组可让扫描从「每次摸一个分散的 Section」变成顺序访存。 */
+    unsigned *sec_name_hash;
+    unsigned sec_name_hash_cap;
 
     Section **priv_sections;
     int nb_priv_sections; /* number of private sections */
