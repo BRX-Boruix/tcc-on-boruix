@@ -115,6 +115,21 @@ def main():
     #    `\n` 在某层被解释成真换行，导致 C 字符串字面量断行（tcc 报
     #    `missing terminating " character`）。正本只有一份，拷贝没有转义问题。
     disk_root = os.path.dirname(dest)          # diskfiles/3p
+
+    # 5a) **tcc 本体**（tcc.elf）。此前**没有任何脚本**把它铺到盘上——它一直是
+    #     手工拷过去的，于是「改了 tccelf.c 却测了旧 tcc」成了**真实事故**
+    #     （2026-10 实测）：一次 A/B 的两臂跑的是同一份旧二进制，红绿两臂的
+    #     5.8s/6.6s 全是噪声，加进去的计时仪器**一行都没被执行到**
+    #     （仪器标记 TCCPROF 在两臂的串口日志里都没出现，才发现盘上不是新 tcc）。
+    #     tcc.elf 由 boruix/build.py 产出到 _build/，本脚本负责**铺到盘上**。
+    #     **缺失即报错**：宁可停下，也不留一份旧编译器在盘上冒充新构建
+    #     （与上面 libc.a 的「不半更新」同一条理由）。
+    tcc_elf = os.path.join(SRC, "_build", "tcc.elf")
+    if not os.path.isfile(tcc_elf):
+        sys.exit("前置检查失败：未找到 " + tcc_elf + "——先跑 boruix/build.py")
+    shutil.copy(tcc_elf, os.path.join(disk_root, "tcc.elf"))
+    print("[stage] tcc.elf <- %s" % tcc_elf)
+
     for name in ("hello.c", "wave2.c", "forkmin.c"):
         src = os.path.join(SRC, "tests", name)
         if os.path.isfile(src):
