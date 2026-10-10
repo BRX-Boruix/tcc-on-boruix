@@ -130,6 +130,16 @@ def main():
     shutil.copy(tcc_elf, os.path.join(disk_root, "tcc.elf"))
     print("[stage] tcc.elf <- %s" % tcc_elf)
 
+    # 5b) **libtcc 能力探针**（tccmt.elf）。同一条理由：探针要证明的是「真实 libtcc
+    #     在当前配置下无互斥」，若盘上留着旧探针，验的就不是当前构建——那正是
+    #     tcc.elf 那次「两臂跑同一份旧二进制」事故的同一形态。故**缺失即报错**。
+    probe_elf = os.path.join(SRC, "_build", "tccmt.elf")
+    if not os.path.isfile(probe_elf):
+        sys.exit("前置检查失败：未找到 " + probe_elf
+                 + "——先跑 boruix/build.py --probe tccmt")
+    shutil.copy(probe_elf, os.path.join(disk_root, "tccmt.elf"))
+    print("[stage] tccmt.elf <- %s" % probe_elf)
+
     for name in ("hello.c", "wave2.c", "forkmin.c"):
         src = os.path.join(SRC, "tests", name)
         if os.path.isfile(src):

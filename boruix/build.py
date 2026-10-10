@@ -31,6 +31,13 @@ BUILD = os.path.join(SRC, "_build")
 CORE = ["tcc.c", "libtcc.c", "tccpp.c", "tccgen.c", "tccdbg.c",
         "tccelf.c", "tccasm.c", "tccrun.c", "x86_64-gen.c", "x86_64-link.c", "i386-asm.c"]
 
+# libtcc 用户程序的目标文件集 = CORE **去掉 tcc.c**。
+#
+# 为什么去掉：tcc.c 是 CLI 入口，自带 main 且无条件 #include "tcctools.c"（见上）。
+# 上游 Makefile 的 LIBTCC_SRC 正是同一个减法。编 tcc.elf 时要 tcc.c，编
+# libtcc 用户程序时不要——两者的差别只有这一个文件。
+LIBTCC = [f for f in CORE if f != "tcc.c"]
+
 
 def pick(env, name):
     cand = os.environ.get(env) or shutil.which(name)
@@ -39,10 +46,51 @@ def pick(env, name):
     return cand
 
 
+def link_probe(a, cc, lld, lib, cflags):
+    """把一个 libtcc 用户程序链成 ELF（**不是** tcc.elf 那种 CLI）。
+
+    与 tcc.elf 的唯一差别是目标文件集：这里用 LIBTCC（无 tcc.c 的 main），
+    再附上探针自己的 .o。入口与 libc 的链接方式与 tcc.elf 完全一致——
+    探针同样是第三方 POSIX argv 程序，故仍用 user_main_argv.o 而不是 crt0.o。
+    """
+    probe_src = os.path.join(HERE, a.probe + ".c")
+    if not os.path.isfile(probe_src):
+        sys.exit("找不到探针源文件 " + probe_src)
+    probe_obj = os.path.join(BUILD, a.probe + ".o")
+    # -I SRC：探针 #include "libtcc.h"，那是上游源码树根下的公开头文件。
+    r = subprocess.run([cc] + cflags + ["-I", SRC, "-c", probe_src, "-o", probe_obj],
+                       capture_output=True)
+    if r.returncode != 0:
+        print("探针编译失败：")
+        for l in (r.stderr or b"").decode("utf-8", "replace").splitlines()[:40]:
+            print("  " + l.strip()[:150])
+        return 1
+    libtcc_objs = [os.path.join(BUILD, f[:-2] + ".o") for f in LIBTCC]
+    missing = [o for o in libtcc_objs if not os.path.isfile(o)]
+    if missing:
+        sys.exit("缺少 libtcc 目标文件（先不带 --probe 跑一次完整构建）：" + str(missing))
+    out = os.path.join(BUILD, a.probe + ".elf")
+    cmd = [lld, "-o", out, "-e", "_start", "-nostdlib", "--no-dynamic-linker",
+           os.path.join(lib, "user_main_argv.o"), probe_obj] + libtcc_objs + [
+           os.path.join(lib, "libc.a"), "-z", "noexecstack", "-z", "norelro",
+           "-T", os.path.join(lib, "linker.ld")]
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0:
+        print("\n探针链接失败：")
+        for l in (r.stderr or b"").decode("utf-8", "replace").splitlines()[:40]:
+            print("  " + l.strip()[:150])
+        return 1
+    print("\n[build_probe] " + out)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sysroot", default=os.environ.get("BORUIX_SYSROOT"))
     ap.add_argument("--compile-only", action="store_true")
+    ap.add_argument("--probe", metavar="NAME",
+                    help="链接 boruix/<NAME>.c 与 libtcc 目标文件成 <NAME>.elf "
+                         "（libtcc 用户程序；不含 tcc.c 的 main）")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     if not a.sysroot or not os.path.isdir(a.sysroot):
@@ -105,6 +153,8 @@ def main():
         return 1
     if a.compile_only:
         return 0
+    if a.probe:
+        return link_probe(a, cc, lld, lib, cflags)
     out = os.path.join(BUILD, "tcc.elf")
     # **用 user_main_argv.o 而不是 user_main.o**：tcc 是第三方程序，假定标准 POSIX argv
     # 数组（逐个解析 argv[1..]）。而 BORUIX 原生 ABI 是 argc=1、argv[0]=整条命令行，
