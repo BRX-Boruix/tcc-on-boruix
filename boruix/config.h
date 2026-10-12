@@ -45,16 +45,20 @@
  * 可用的解释器"决定），而不是删掉这一行。 */
 #define CONFIG_TCC_SWITCHES "-static"
 
-/* 关闭线程锁：tcc 默认用 POSIX 信号量（<semaphore.h>）保护"libtcc 被多线程共用"的场景，
- * 而 BORUIX 的 libc 不提供 POSIX 信号量。
+/* 线程锁：tcc 用 POSIX 信号量（<semaphore.h>）保护「libtcc 被多线程共用」的场景。
  *
- * **这不是绕过**：上游为此**专门提供了单线程配置**——CONFIG_TCC_SEMLOCK 为 0 时
- * tcc.h 把 WAIT_SEM/POST_SEM 定义成空宏（见 tcc.h 的 `#else` 分支）。BORUIX 上 tcc 由
- * shell 以单个进程运行，正是单线程用法。
+ * **本项由 0 改为 1（2026-10）**。此前为 0 的理由是「BORUIX 的 libc 不提供 POSIX 信号量」——
+ * 该前提**已不再成立**：`libc.a` 现在导出 `sem_init/sem_wait/sem_trywait/sem_post/
+ * sem_destroy/sem_getvalue`（语义与 `csrc/pthread_sync.c` 一致：用户态 count+epoch 原子 +
+ * 内核 SYNC 字作 park/unpark，epoch 是丢唤醒守卫），声明见 `libc/include/semaphore.h`。
+ * 这正是当初注释里写的「**先在 libc 里实现真正的信号量，再打开这一项**」。
  *
- * **诚实边界**：因此本移植**不支持**把 libtcc 当库在多线程里共用。
- * 若将来要支持，正确做法是先在 libc 里实现真正的信号量，再打开这一项。 */
-#define CONFIG_TCC_SEMLOCK 0
+ * 打开后 `tcc.h` 的 WAIT_SEM/POST_SEM 走真实信号量分支（见其 `#if CONFIG_TCC_SEMLOCK`）。
+ * 配套改动：`tccmt.c` 的断言同步翻面（多线程共用 ⇒ 临界区**不重叠**、`tcc_state` **不被改写**）。
+ *
+ * **诚实边界**：`sem_*` 目前只在**单线程语义**上被机内验证过（见 3p.md 二十续）；
+ * 本项打开后由 `tccmt.elf` 在**真实多线程**下检验——那才是这条能力的最终证据。 */
+#define CONFIG_TCC_SEMLOCK 1
 
 /* 标识"这是 BORUIX 移植"。
  *

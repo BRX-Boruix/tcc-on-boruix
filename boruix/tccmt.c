@@ -202,17 +202,20 @@ int main(int argc, char **argv) {
            g_clobbered);
     printf("[tccmt] tcc_state after both exited = %p (expect 0)\n", (void *)tcc_state);
 
-    /* 断言的是**当前构建的真实前提**：无互斥 ⇒ 两个临界区重叠、全局被改写。
-     * 一旦有人启用 CONFIG_TCC_SEMLOCK，这里必然失败——那正是「前提已变、文档需
-     * 重新裁定」的信号，不是把失败当噪声放过。 */
-    if (g_overlap != 1) {
-        printf("[tccmt] FAIL: critical sections did not overlap -> mutual exclusion IS\n");
-        printf("[tccmt]       in effect; the documented single-threaded limitation no\n");
-        printf("[tccmt]       longer holds as stated.\n");
+    /* 断言的是**当前构建的真实前提**。本探针的预期已随 `CONFIG_TCC_SEMLOCK` 翻面
+     * （2026-10，见 boruix/config.h 的说明）：libc 现在提供真实 POSIX 信号量 ⇒
+     * tcc 的 WAIT_SEM/POST_SEM 生效 ⇒ 后进入者**阻塞**在信号量上，两个临界区**不重叠**、
+     * `tcc_state` **不被改写**。
+     *
+     * **不是把失败当噪声放过**：若这里反而观察到重叠/改写，说明信号量**没起作用**
+     * （例如 libc 的 sem_* 是假的），那是必须报出来的真缺陷。 */
+    if (g_overlap != 0) {
+        printf("[tccmt] FAIL: critical sections overlapped -> mutual exclusion NOT in effect\n");
+        printf("[tccmt]       (CONFIG_TCC_SEMLOCK=1 but the semaphore did not serialize)\n");
         rc = 6;
     }
-    if (g_clobbered != 1) {
-        printf("[tccmt] FAIL: tcc_state never pointed at the peer state -> no corruption\n");
+    if (g_clobbered != 0) {
+        printf("[tccmt] FAIL: tcc_state was clobbered by the peer -> not serialized\n");
         rc = 7;
     }
 
@@ -220,6 +223,6 @@ int main(int argc, char **argv) {
     tcc_delete(b);
 
     if (rc == 0)
-        printf("[tccmt] PASS: tcc_state is shared with no mutual exclusion (SEMLOCK=0)\n");
+        printf("[tccmt] PASS: libtcc shared across threads WITH mutual exclusion (SEMLOCK=1)\n");
     return rc;
 }
