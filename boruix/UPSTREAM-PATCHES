@@ -26,7 +26,7 @@
 
 其余差异都通过**配置**吸收，不动上游源码：
 
-- `boruix/config.h`：`TCC_TARGET_X86_64` / `CONFIG_TCC_STATIC` / `CONFIG_TCC_SEMLOCK 0` /
+- `boruix/config.h`：`TCC_TARGET_X86_64` / `CONFIG_TCC_STATIC` / `CONFIG_TCC_SEMLOCK 1` /
   `CONFIG_TCC_SWITCHES "-static"`（产物默认静态链接——系统里没有可用的解释器，见该文件内的理由）；
 - 构建脚本 `boruix/build.py`：自带源文件清单与旗标，不用上游 Makefile。
 

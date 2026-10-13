@@ -9,7 +9,7 @@ tcc 链接一个程序时要找三类东西：CRT（`crt1.o`/`crti.o`/`crtn.o`�
 | --- | --- | --- |
 | `crt1.o` | 我们的入口桥接（提供 `user_main`、引用 `main`）：`user_main.o` 或 `user_main_argv.o` | 已备（拷贝为 `crt1.o`） |
 | `crti.o` / `crtn.o` | **空对象**：常规 POSIX 里它们放 `.init`/`.fini` 前后缀，本系统没有该机制 | 已备（空 `.o`） |
-| `libtcc1.a` | 编译器支持例程（64 位除法、软浮点等） | **未备** |
+| `libtcc1.a` | 编译器支持例程（64 位除法、软浮点等） | 已备（`boruix/build_libtcc1.py` 产出，`stage_assets.py` 铺到盘） |
 | `libc` | `<sysroot>/lib/libc.a`（含 libsys，入口 `_start` 就在里面） | 已备 |
 
 资产由 `boruix/stage_assets.py` 一条命令铺到数据盘（`tools/diskfiles/3p/tcc/`）。
