@@ -81,7 +81,10 @@
  *
  * **为什么是数据盘路径**：BORUIX 目前**没有 `/usr`**（liveCD 只有 `/programs` 放内建程序），
  * 故移植阶段把 tcc 的运行时资产放在数据盘的 `/3p/tcc` 下。等系统有了真正的 `/usr`，
- * 只需改这一行 + 搬目录——这正是把它做成**单一配置点**的原因（不散落在别处）。 */
+ * 只需改这一行 + 搬目录——这正是把它做成**单一配置点**的原因（不散落在别处）。
+ *
+ * **取值由 tools/abi/constants.json 生成**（tools/abi/generate.py 的整行目标，
+ * 门禁 generate.py --check 会核对）。改路径请改那份 JSON，不要手改下面这一行。 */
 #define CONFIG_TCCDIR "/volumes/BORUIX_DATA/3p/tcc"
 
 /* CRT 前缀：tcc 在这里找 `crt1.o` / `crti.o` / `crtn.o`（默认 `/usr/lib`，本系统没有）。
