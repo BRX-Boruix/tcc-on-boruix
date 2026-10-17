@@ -79,13 +79,14 @@
  *
  * `{B}` 在 tcc.h 里会被替换成这个值（也即运行期 `-B` 选项的默认值）。
  *
- * **为什么是数据盘路径**：BORUIX 目前**没有 `/usr`**（liveCD 只有 `/programs` 放内建程序），
- * 故移植阶段把 tcc 的运行时资产放在数据盘的 `/3p/tcc` 下。等系统有了真正的 `/usr`，
- * 只需改这一行 + 搬目录——这正是把它做成**单一配置点**的原因（不散落在别处）。
+ * **留空 = 未配置**：资源目录由 `argv[0]` 推导（见 tcc.c 的 boruix_set_lib_path_from_argv0
+ * 与 boruix/UPSTREAM-PATCHES）。理由：tcc 可以被放在**任意盘、任意卷标、任意目录**里；
+ * 把路径编译期烧死等于假定用户用的是作者那张盘——那正是本项修复的东西。
  *
- * **取值由 tools/abi/constants.json 生成**（tools/abi/generate.py 的整行目标，
- * 门禁 generate.py --check 会核对）。改路径请改那份 JSON，不要手改下面这一行。 */
-#define CONFIG_TCCDIR "/volumes/BORUIX_DATA/3p/tcc"
+ * **曾经**这一行是 `"/volumes/BORUIX_DATA/3p/tcc"`，并由 tools/abi/constants.json **生成**
+ * （把"移植阶段的临时安排"升格成了 ABI 常量，还加了门禁防止它被改）。那是错的：
+ * 盘名是数据，系统不需要知道。 */
+#define CONFIG_TCCDIR ""
 
 /* CRT 前缀：tcc 在这里找 `crt1.o` / `crti.o` / `crtn.o`（默认 `/usr/lib`，本系统没有）。
  *

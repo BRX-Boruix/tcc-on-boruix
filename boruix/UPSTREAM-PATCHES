@@ -31,3 +31,20 @@
 - 构建脚本 `boruix/build.py`：自带源文件清单与旗标，不用上游 Makefile。
 
 **目标是把补丁压到最小**：补丁越少，跟进上游越容易。
+
+## 2. `tcc.c` —— 资源目录改由 `argv[0]` 推导（1 处插入 + 1 个静态函数）
+
+**为什么必须改**：资源目录（`include/` 与运行时对象）原先由 `boruix/config.h` 的
+`CONFIG_TCCDIR` 编译期定死成 `/volumes/BORUIX_DATA/3p/tcc`。那是把**盘名**烧进了二进制——
+tcc 可以被放在任意盘、任意卷标、任意目录里；换一块盘它就找不到自己的头文件与 `libc.a`，
+而且**不会报错**（静默编译失败）。
+
+**改法**：
+
+- `boruix/config.h`：`CONFIG_TCCDIR` 改为空串 = 「未配置」；
+- `tcc.c`：新增 `boruix_set_lib_path_from_argv0`（取 `dirname(argv[0]) + "/tcc"`），
+  在 `tcc_new()` 之后、`tcc_parse_args` **之前**调用——`-B` 在参数解析里处理，仍可覆盖。
+- `argv[0]` 没有路径分量（经 PATH 查找执行）时保持未配置，交给 `-B`。
+
+**已删除的生成器接线**：`tools/abi/generate.py` 原先把这一行当「整行生成」目标，
+取值来自 `constants.json` 的卷标。那条接线已移除（`LINE_TARGETS` 现为空）。

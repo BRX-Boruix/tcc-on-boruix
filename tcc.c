@@ -286,6 +286,33 @@ static unsigned getclock_ms(void)
 #endif
 }
 
+/* Boruix: 资源目录（include/ 与运行时对象）由 argv[0] 推导。
+ *
+ * 为什么：tcc 可以被放在任意盘、任意卷标、任意目录里；把路径编译期烧死等于假定
+ * 用户用的是作者那张盘。CONFIG_TCCDIR 留空表示"未配置"，此时用本函数推导。
+ * -B 仍可覆盖——它在 tcc_parse_args 里处理，晚于本调用。
+ *
+ * 推导规则：`<tcc 所在目录>/tcc`。本系统的布局把 include/ 与运行时对象放在二进制
+ * 旁边的 tcc/ 子目录里（见 boruix/CRT-AND-LIBS）。argv[0] 没有路径分量（经 PATH
+ * 查找执行）时保持未配置，交给 -B。 */
+static void boruix_set_lib_path_from_argv0(TCCState *s, const char *argv0)
+{
+    char buf[1024];
+    const char *slash;
+    size_t n;
+    if (!argv0)
+        return;
+    slash = strrchr(argv0, '/');
+    if (!slash || slash == argv0)
+        return;
+    n = (size_t)(slash - argv0);
+    if (n + 5 >= sizeof(buf))
+        return;
+    memcpy(buf, argv0, n);
+    memcpy(buf + n, "/tcc", 5);
+    tcc_set_lib_path(s, buf);
+}
+
 int main(int argc, char **argv)
 {
     TCCState *s, *s1;
